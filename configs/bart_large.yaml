@@ -1,0 +1,76 @@
+experiment_id: v4_bart_large_slots_r2
+seed: 209
+test_only: false
+data_dir: data/esc
+output_dir: artifacts
+inner_folds: 3
+branches:
+- D1
+- D2
+- D3
+- D4
+- C
+- S
+- M
+rules:
+  mode: scope
+  spacy_model: en_core_web_sm
+retrieval:
+  name: sentence-transformers/all-mpnet-base-v2
+  revision: e8c3b32edf5434bc2275fc9bab85f82640a19130
+  device: cpu
+  batch_size: 32
+  strategy: R2
+  pool: four
+  demo_count: 3
+  candidates: 50
+  hard_min_similarity: 0.5
+  review_file: null
+model:
+  name: facebook/bart-large
+  revision: cb48c1365bd826bd521f650dc2e0940aee54720c
+  head: bart_slots
+  temperature: 1.0
+  slot_relation_weight: 0.0
+  gradient_checkpointing: true
+  warmup: false
+input:
+  max_length: 512
+  demo_max_tokens: 100
+  comparison_tokenizers:
+  - name: google-bert/bert-base-uncased
+    revision: 86b5e0934494bd15c9632b12f734a8a67f723594
+  - name: facebook/bart-base
+    revision: aadd2ab0ae0c8268c7c9693540e9904811f36177
+training:
+  device: auto
+  cpu_threads: 4
+  epochs: 10
+  patience: 2
+  batch_size: 2
+  accumulation_steps: 16
+  learning_rate: 2.0e-05
+  weight_decay: 0.01
+  warmup_ratio: 0.06
+  max_grad_norm: 1.0
+  precision: fp32
+  validation_fraction: 0.15
+gate:
+  name: google-bert/bert-base-uncased
+  revision: 86b5e0934494bd15c9632b12f734a8a67f723594
+  objective: G3
+  teacher_temperature: 1.0
+  teacher_weight: 0.5
+  temperature: 1.0
+  hidden_size: 256
+  dropout: 0.1
+  learning_rate: 2.0e-05
+  mlp_learning_rate: 0.0001
+  epochs: 10
+  patience: 2
+  validation_fraction: 0.15
+graph:
+  enabled: false
+  threshold: 0.9
+  max_edges: 12
+  max_hops: 2

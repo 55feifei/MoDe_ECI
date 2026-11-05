@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Research artifacts
+data/
+models/
+artifacts/
+runs/
+.env

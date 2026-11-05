@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mode-eci-v4"
+version = "0.4.1"
+description = "Trainable event causality experts with retrieval and out-of-fold gating"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26,<3", "PyYAML>=6,<7", "scikit-learn>=1.5,<2",
+  "torch>=2.6,<3", "transformers>=4.57,<5", "sentence-transformers>=3.4,<4",
+  "spacy>=3.8,<4", "tqdm>=4.66,<5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+mode-eci = "mode_eci.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

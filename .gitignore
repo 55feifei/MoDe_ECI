@@ -225,3 +225,9 @@ models/
 artifacts/
 runs/
 .env
+
+docs/
+.chart-data-SfENyO
+.chart-data-PjBxfk
+.vscode
+output/

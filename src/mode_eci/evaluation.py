@@ -8,12 +8,15 @@ from sklearn.metrics import average_precision_score
 from .data import LABELS
 
 
-def prf(gold, predicted, directional=False):
+def prf(gold, predicted, directional=False, *, reverse_as_fp_only=False):
+    """可选方向口径下，反向仍计 FP，只有预测为 NONE 的正例计 FN。"""
     gold, predicted = np.asarray(gold), np.asarray(predicted)
     positive_gold, positive_pred = gold != 0, predicted != 0
     correct = gold == predicted if directional else positive_gold == positive_pred
     tp = int(np.sum(positive_gold & positive_pred & correct))
     fp, fn = int(positive_pred.sum()) - tp, int(positive_gold.sum()) - tp
+    if directional and reverse_as_fp_only:
+        fn = int(np.sum(positive_gold & ~positive_pred))
     precision = tp / (tp + fp) if tp + fp else 0.0
     recall = tp / (tp + fn) if tp + fn else 0.0
     defined = bool(positive_gold.any())
@@ -50,14 +53,17 @@ def metrics(gold, probabilities, labels=None):
         raise ValueError("Invalid three-class probabilities")
     if not np.allclose(probabilities.sum(-1), 1, atol=1e-5):
         raise ValueError("Probabilities must sum to one")
+    result = {"n": len(gold),
+              "direction": prf(gold, labels, directional=True),
+              "direction_fp_only": prf(gold, labels, directional=True, reverse_as_fp_only=True),
+              "existence": prf(gold, labels)}
     if not len(gold):
-        return {"n": 0, "direction": prf([], [], True), "existence": prf([], [])}
+        return result
     onehot = np.eye(3)[gold]
-    result = {"n": len(gold), "direction": prf(gold, labels, True), "existence": prf(gold, labels),
-              "nll": float(-np.log(np.maximum(probabilities[np.arange(len(gold)), gold], 1e-12)).mean()),
-              "brier": float(np.sum((probabilities - onehot) ** 2, axis=1).mean()),
-              "existence_average_precision": float(average_precision_score(gold != 0, probabilities[:, 1:].sum(-1))) if np.any(gold) else None,
-              "class_reliability": {name: reliability(probabilities[:, i], gold == i) for i, name in enumerate(LABELS)}}
+    result.update(nll=float(-np.log(np.maximum(probabilities[np.arange(len(gold)), gold], 1e-12)).mean()),
+                  brier=float(np.sum((probabilities - onehot) ** 2, axis=1).mean()),
+                  existence_average_precision=float(average_precision_score(gold != 0, probabilities[:, 1:].sum(-1))) if np.any(gold) else None,
+                  class_reliability={name: reliability(probabilities[:, i], gold == i) for i, name in enumerate(LABELS)})
     return result
 
 
@@ -74,9 +80,9 @@ def align_predictions(pairs, predictions):
 def evaluate(pairs, predictions):
     predictions = align_predictions(pairs, predictions)
     gold = np.array([p["label"] for p in pairs])
-    probabilities = np.array([p["probabilities"] for p in predictions])
+    probabilities = np.array([p["probabilities"] for p in predictions]) if predictions else np.empty((0, 3))
     labels = np.array([p["label"] for p in predictions])
-    groups = defaultdict(list)
+    groups = defaultdict(list, overall=[], intra=[], cross=[])
     for index, row in enumerate(predictions):
         feature = row["features"]
         for name in ("overall", feature["demo_cell"], "intra" if feature["sentence_distance"] == 0 else "cross",

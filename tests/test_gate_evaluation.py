@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from mode_eci.evaluation import align_predictions, prf
+from mode_eci.evaluation import align_predictions, evaluate, prf
 from mode_eci.gate import gate_loss, masked_weights, teacher_targets
 from mode_eci.io import claim_run
 
@@ -49,6 +49,33 @@ def test_wrong_direction_counts_fp_and_fn_and_coverage_is_strict():
     assert prf([0], [0], True)["f1"] is None
     with pytest.raises(ValueError, match="missing"):
         align_predictions([{"pair_id": "q"}], [])
+
+
+def test_direction_f1_by_sentence_distance_and_reversal_policy():
+    pairs, predictions = [], []
+    samples = [(1, 1, 0), (1, 2, 0), (0, 2, 0), (0, 0, 0),
+               (2, 2, 2), (1, 1, 1), (2, 1, 1), (1, 0, 1)]
+    for i, (gold, predicted, distance) in enumerate(samples):
+        pairs.append({"pair_id": str(i), "label": gold})
+        probabilities = np.eye(3)[predicted].tolist()
+        expert = {"probabilities": probabilities, "coverage": {"truncated": False}, "retrieval": None}
+        predictions.append({"pair_id": str(i), "label": predicted, "probabilities": probabilities,
+                            "features": {"sentence_distance": distance, "distance_bucket": distance,
+                                         "demo_cell": "D4" if distance else "D2"},
+                            "experts": {"S": expert}, "branches": ["S"], "weights": [1.0],
+                            "status": "success", "test_only": True})
+
+    report = evaluate(pairs, predictions)
+    assert [report[group]["direction"]["f1"] for group in ("overall", "intra", "cross")] == [0.5, 0.4, 4 / 7]
+    for group, expected in {"overall": (3, 3, 1, 0.6), "intra": (1, 2, 0, 0.5),
+                            "cross": (2, 1, 1, 2 / 3)}.items():
+        alternative = report[group]["direction_fp_only"]
+        assert tuple(alternative[key] for key in ("tp", "fp", "fn", "f1")) == expected
+    assert report["label_NONE"]["direction_fp_only"]["f1"] is None
+
+    intra_only = evaluate(pairs[:4], predictions[:4])
+    assert intra_only["cross"]["n"] == 0
+    assert intra_only["cross"]["direction_fp_only"]["f1"] is None
 
 
 def test_experiment_config_reuse_is_rejected(tmp_path):

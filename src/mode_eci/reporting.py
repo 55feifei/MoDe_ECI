@@ -40,7 +40,9 @@ def summarize_files(config, paths, output):
         by_seed.setdefault(seed, []).extend(rows)
         ids = {r["pair_id"] for r in rows}
         pairs = [p for p in corpus.pairs if p["pair_id"] in ids]
-        reports.setdefault(seed, {})[manifest["fold"]] = evaluate(pairs, rows)["overall"]
+        report = evaluate(pairs, rows)
+        reports.setdefault(seed, {})[manifest["fold"]] = {
+            **report["overall"], "intra": report["intra"], "cross": report["cross"]}
     result = {"definition": definition, "seeds": {}}
     pairs = [p for p in corpus.pairs if p["pair_id"] in expected]
     for seed, rows in by_seed.items():
@@ -48,10 +50,16 @@ def summarize_files(config, paths, output):
             raise ValueError("Each seed must contain exactly one prediction for every non-development test pair")
         result["seeds"][seed] = {"pooled": evaluate(pairs, rows), "folds": reports[seed]}
         write_jsonl(Path(output).parent / f"pooled_seed_{seed}.jsonl", rows)
-    values = [value["pooled"]["overall"]["direction"]["f1"] for value in result["seeds"].values()]
-    valid = [value for value in values if value is not None]
-    result["pooled_direction_f1_mean"] = float(np.mean(valid)) if valid else None
-    result["pooled_direction_f1_std"] = float(np.std(valid, ddof=1)) if len(valid) > 1 else None
+    pooled_f1 = {group: {} for group in ("overall", "intra", "cross")}
+    for group, metrics in pooled_f1.items():
+        for metric in ("direction", "direction_fp_only"):
+            scores = [value["pooled"][group][metric]["f1"] for value in result["seeds"].values()]
+            valid = [score for score in scores if score is not None]
+            metrics[metric] = {"mean": float(np.mean(valid)) if valid else None,
+                               "std": float(np.std(valid, ddof=1)) if len(valid) > 1 else None}
+    result["pooled_f1"] = pooled_f1
+    result["pooled_direction_f1_mean"] = pooled_f1["overall"]["direction"]["mean"]
+    result["pooled_direction_f1_std"] = pooled_f1["overall"]["direction"]["std"]
     result["test_only"] = any(value["pooled"]["test_only"] for value in result["seeds"].values())
     write_json(output, result)
     return result

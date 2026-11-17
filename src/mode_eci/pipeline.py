@@ -88,8 +88,10 @@ class Experiment:
         self.contexts = {}
 
     def plan(self):
+        demo_jobs = (len(self.groups) + 1) if self.config["model"].get("demo_pretraining", False) else 0
         return {"root": str(self.root), "outer_fold": self.fold, "inner_groups": self.groups,
-                "expert_training_jobs": (len(self.groups) + 1) * len(self.config["branches"]),
+                "expert_training_jobs": (len(self.groups) + 1) * len(self.config["branches"]) + demo_jobs,
+                "demo_pretraining_jobs": demo_jobs,
                 "train_pairs": len(self.corpus.pairs_for(self.train_docs)), "dev_pairs": len(self.corpus.pairs_for(self.dev_docs)),
                 "test_pairs": len(self.corpus.pairs_for(self.test_docs)), "branches": self.config["branches"],
                 "test_only": self.config["test_only"]}
@@ -167,7 +169,7 @@ class Experiment:
     def expert_rows(self, context, documents, branch, builder, demo_variant="normal", graphs=None):
         features = self.get_features()
         pairs = self.corpus.pairs_for(documents)
-        if branch.startswith("D"):
+        if branch.startswith("D") and branch != "D_all":
             pairs = [p for p in pairs if features[p["pair_id"]]["demo_cell"] == branch]
         plans = self.retrieval_plans(context, documents) if branch.startswith("D") else {}
         rows = []
@@ -186,17 +188,21 @@ class Experiment:
             labels = None
             if demo_variant == "shuffle_labels":
                 labels = [(d["label"] + 1) % 3 for d in demos]
-            built = builder.build(query, branch, feature, demos, graph_text, labels)
+            # 通用专家沿用每条查询所属分支的检索及模板，只有参数共享。
+            input_branch = feature["demo_cell"] if branch == "D_all" else branch
+            built = builder.build(query, input_branch, feature, demos, graph_text, labels)
             if branch == "G" and built["coverage"]["graph_edges_retained"] == 0:
                 continue
-            rows.append(dict(built, pair_id=pair["pair_id"], label=pair["label"], retrieval=plan))
+            rows.append(dict(built, pair_id=pair["pair_id"], doc_id=pair["doc_id"],
+                             demo_cell=feature["demo_cell"], label=pair["label"], retrieval=plan))
         return rows
 
     def train_experts(self, scope="final", branches=None):
         context = self.context(scope)
         branches = self.config["branches"] if branches is None else branches
         for branch in branches:
-            if branch not in self.config["branches"]:
+            is_pretraining = branch == "D_all" and self.config["model"].get("demo_pretraining", False)
+            if branch not in self.config["branches"] and not is_pretraining:
                 raise ValueError(f"Branch not configured: {branch}")
             destination = context["directory"] / "experts" / branch
             if (destination / "training.json").exists() and read_json(destination / "training.json")["status"] == "complete":
@@ -205,11 +211,23 @@ class Experiment:
                 self.train_graph_expert(scope)
                 continue
             warmup = context["directory"] / "warmup" / "checkpoint"
-            if self.config["model"]["warmup"] and branch != "S":
+            demo_pretraining = (branch in ("D1", "D2", "D3", "D4")
+                                and self.config["model"].get("demo_pretraining", False))
+            if demo_pretraining:
+                self.train_experts(scope, ["D_all"])
+            elif self.config["model"]["warmup"] and branch != "S":
                 self.train_warmup(scope)
             seed_everything(self.config["seed"], self.config["training"]["cpu_threads"])
-            if self.config["model"]["warmup"] and branch != "S":
-                model = Expert.load(warmup)
+            initialization = None
+            if demo_pretraining:
+                initialization = context["directory"] / "experts" / "D_all" / "checkpoint"
+            elif self.config["model"]["warmup"] and branch != "S":
+                initialization = warmup
+            if initialization is not None:
+                model = Expert.load(initialization)
+                if self.config["model"]["gradient_checkpointing"]:
+                    model.backbone.gradient_checkpointing_enable()
+                    model.backbone.config.use_cache = False
             else:
                 model = Expert.create(self.config["model"])
             builder = self.input_builder(model.tokenizer, model.head)
@@ -224,9 +242,24 @@ class Experiment:
                 predictions = predict_expert(current, validation, self.config["training"])
                 return validation_metrics([r["label"] for r in validation], [r["probabilities"] for r in predictions])
 
-            fit(model, rows, model.tokenizer, self.config["training"], self.config["seed"], destination, loss_fn,
-                validate if validation else None, lambda current: current.save(destination / "checkpoint"))
+            if not rows and demo_pretraining:
+                # 空分支没有可用监督，保留通用专家并显式记录，不能伪造微调样本。
+                model.save(destination / "checkpoint")
+                summary = {"status": "complete", "training_mode": "initialized_only",
+                           "reason": "no_training_queries_in_cell", "best_epoch": 0, "epochs_run": 0,
+                           "training_samples": 0, "seconds": 0.0, "peak_cuda_bytes": None}
+                write_json(destination / "training.json", summary)
+                write_json(destination / "progress.json", summary)
+                print(f"{destination}: no training queries; retained D_all parameters", flush=True)
+            else:
+                fit(model, rows, model.tokenizer, self.config["training"], self.config["seed"], destination, loss_fn,
+                    validate if validation else None, lambda current: current.save(destination / "checkpoint"))
             write_json(destination / "provenance.json", {"train_documents": context["train"], "branch": branch,
+                                                        "initialization": None if initialization is None else str(initialization),
+                                                        "initialization_fingerprint": None if initialization is None else read_json(initialization / "expert.json")["checkpoint_fingerprint"],
+                                                        "training_pair_ids": [r["pair_id"] for r in rows],
+                                                        "training_cells": {cell: sum(r["demo_cell"] == cell for r in rows)
+                                                                           for cell in ("D1", "D2", "D3", "D4")},
                                                         "test_only": self.config["test_only"]})
             release(model)
             del model

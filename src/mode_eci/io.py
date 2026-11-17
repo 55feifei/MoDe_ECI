@@ -132,6 +132,11 @@ def validate_config(config):
         raise ValueError("G requires graph.enabled")
     if config["model"]["warmup"] and "S" not in branches:
         raise ValueError("Task warmup requires the S branch")
+    demo_pretraining = config["model"].get("demo_pretraining", False)
+    if not isinstance(demo_pretraining, bool):
+        raise ValueError("model.demo_pretraining must be boolean")
+    if demo_pretraining and not any(b.startswith("D") for b in branches):
+        raise ValueError("Demo pretraining requires at least one D branch")
     if config["training"]["batch_size"] < 1 or config["training"]["accumulation_steps"] < 1:
         raise ValueError("batch_size and accumulation_steps must be positive")
     if config["training"]["epochs"] < 1 or config["gate"]["epochs"] < 1:

@@ -1,5 +1,14 @@
 # MoDE ECI v4 实验工程
 
+通用 demo 专家预训练已支持：`model.demo_pretraining: true` 先在当前 scope 全量查询及各自 demos 上训练 D_all，再初始化 D1–D4 做分支微调。D_all 不进入最终融合。指定环境下离线完成 seed3407、fold0 的专家、OOF、G3 与 dev/test 检验：
+
+```powershell
+$python = "F:\MoDE_ECI_research\.venv\Scripts\python.exe"
+& $python scripts/run_demo_pretraining.py --config configs/roberta_mlm_dall_seed3407_gpu.yaml --fold 0
+```
+
+进度和最终审核位于 `runs/roberta_dall_seed3407_gpu/`。训练权重仍保存在配置指定的独立实验目录中。
+
 本仓库实现 v4.1 的可训练多专家方案：规则选择四类 demo 分支之一，MPNet 检索训练示例，BERT 或 BART 专家输出三类分布，独立 BERT 门控融合概率。正式训练和评测在服务器执行；本机验收使用微型随机模型及少量真实资产前向，不提供研究成绩。
 
 ## 已实现的方法
@@ -152,3 +161,24 @@ python scripts/verify_local_assets.py --data-dir F:\MoDE_ECI_research\data\esc -
 ```
 
 该脚本只建立三篇训练文档的小索引并对三条查询前向，不做正式训练或研究评测。
+
+## VS Code 调试
+
+仓库提供 `.vscode/launch.json`，用于在真实程序上打断点和单步调试，不需要额外调试脚本。
+
+1. 用 VS Code 打开仓库，选择 Python 解释器（推荐 `.venv\Scripts\python.exe`，或已安装项目依赖的解释器）。
+2. 按 `F5`，从下拉列表选择配置：
+   - `MoDE ECI: 选择子命令`：交互输入 config/fold，并选择 plan/audit-rules/oof/run/doctor/verify-local；
+   - `MoDE ECI: plan`、`audit-rules`、`build-index`、`train-experts`、`oof`、`cache-experts`、
+     `train-gate G1`、`predict dev equal/learned`、`run dev`、`verify-local`；
+   - `Pytest: debug current test file`、`Pytest: all tests`；
+   - `Python: current file`。
+3. 在源码中直接下断点：
+   - `src/mode_eci/pipeline.py`：`Experiment.__init__`、`expert_rows`、`train_experts`、`generate_oof`、`gate_rows`、`train_gate`、`predict`；
+   - `src/mode_eci/training.py`：`fit`、`predict_expert`；
+   - `src/mode_eci/experts.py`：`Expert.forward`；
+   - `src/mode_eci/gate.py`：`masked_weights`、`teacher_targets`、`gate_loss`。
+
+所有配置都注入了 `PYTHONPATH=src` 和 `PYTHONIOENCODING=utf-8`。默认 `justMyCode: true`，只停在项目代码；要单步进入 `transformers`/`torch`，改成 `false`。
+
+真实配置的 `scope` 规则需要 spaCy 和 `en_core_web_sm`，MPNet 检索需要 `sentence-transformers`。想先跑通流程可选择 `MoDE ECI: verify-local`，它使用 `test_only` 微型随机模型和 `rules.mode=lexical`，不依赖 spaCy 或 MPNet 下载。

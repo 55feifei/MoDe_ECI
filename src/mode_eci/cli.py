@@ -149,7 +149,8 @@ def main(argv=None):
             output = {"status": "complete", "objective": args.objective}
         elif args.command == "predict":
             location, report = experiment.predict(args.split, args.fusion, args.objective, args.top_k, args.drop, args.demo_variant)
-            output = {"directory": str(location), "overall": report["overall"], "test_only": report["test_only"]}
+            output = {"directory": str(location), "overall": report["overall"], "intra": report["intra"],
+                      "cross": report["cross"], "test_only": report["test_only"]}
         elif args.command == "run":
             experiment.run(args.objectives, args.split)
             output = {"status": "complete", "directory": str(experiment.root)}

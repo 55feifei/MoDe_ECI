@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--review-file")
     parser.add_argument("--graph", action="store_true")
     parser.add_argument("--warmup", action="store_true")
+    parser.add_argument("--demo-pretraining", action="store_true")
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--teacher-temperature", type=float)
     parser.add_argument("--teacher-weight", type=float)
@@ -42,6 +43,8 @@ def main():
             config["branches"].append("G")
     if args.warmup:
         config["model"]["warmup"] = True
+    if args.demo_pretraining:
+        config["model"]["demo_pretraining"] = True
     definition = copy.deepcopy(config)
     # 同一方法的不同种子仍用同一 experiment_id，输出由 seed 子目录隔离。
     definition.pop("seed")

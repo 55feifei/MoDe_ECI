@@ -81,6 +81,8 @@ def fit(model, rows, tokenizer, settings, seed, directory, loss_fn, validation_f
         torch.cuda.reset_peak_memory_stats()
     history, best, stale, best_epoch = [], None, 0, 0
     started = time.monotonic()
+    last_progress = started
+    print(f"{directory}: training_samples={len(rows)} planned_updates={updates}", flush=True)
     for epoch in range(settings["epochs"]):
         model.train()
         indices = list(range(len(rows)))
@@ -106,6 +108,11 @@ def fit(model, rows, tokenizer, settings, seed, directory, loss_fn, validation_f
             scaler.update()
             scheduler.step()
             optimizer_steps += 1
+            if time.monotonic() - last_progress >= 30:
+                write_json(directory / "progress.json", {"status": "running", "epoch": epoch + 1,
+                           "optimizer_steps": optimizer_steps, "updates_per_epoch": math.ceil(len(batches) / settings["accumulation_steps"]),
+                           "elapsed_seconds": time.monotonic() - started})
+                last_progress = time.monotonic()
         validation = validation_fn(model) if validation_fn is not None else None
         key = (validation["direction_f1"], -validation["nll"]) if validation is not None else (epoch, 0)
         record = {"epoch": epoch + 1, "training_loss": total_loss / len(rows), "validation": validation,
@@ -125,4 +132,5 @@ def fit(model, rows, tokenizer, settings, seed, directory, loss_fn, validation_f
                "training_samples": len(rows), "seconds": time.monotonic() - started,
                "peak_cuda_bytes": torch.cuda.max_memory_allocated() if device.startswith("cuda") else None}
     write_json(directory / "training.json", summary)
+    write_json(directory / "progress.json", dict(summary, status="complete"))
     return summary

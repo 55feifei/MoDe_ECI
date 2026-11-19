@@ -59,7 +59,7 @@ def predict_expert(model, rows, settings):
 
 
 def fit(model, rows, tokenizer, settings, seed, directory, loss_fn, validation_fn, save_fn, parameter_groups=None):
-    """训练一项任务，按方向 F1、NLL 依次选最佳轮次。
+    """训练一项任务，按任务的 F1、NLL 依次选最佳轮次。
 
     中断任务从固定种子重跑；完成任务由上层清单恢复。梯度累积按实际样本数
     加权，包括最后一个不足 batch 的累积组，避免它得到额外权重。
@@ -114,7 +114,7 @@ def fit(model, rows, tokenizer, settings, seed, directory, loss_fn, validation_f
                            "elapsed_seconds": time.monotonic() - started})
                 last_progress = time.monotonic()
         validation = validation_fn(model) if validation_fn is not None else None
-        key = (validation["direction_f1"], -validation["nll"]) if validation is not None else (epoch, 0)
+        key = (validation["selection_f1"], -validation["nll"]) if validation is not None else (epoch, 0)
         record = {"epoch": epoch + 1, "training_loss": total_loss / len(rows), "validation": validation,
                   "optimizer_steps": optimizer_steps, "last_gradient_norm": float(norm),
                   "elapsed_seconds": time.monotonic() - started}

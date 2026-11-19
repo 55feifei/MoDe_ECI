@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+from .tasks import get_task
+
 
 def digest(value):
     payload = json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
@@ -108,6 +110,12 @@ def load_config(path):
 
 def validate_config(config):
     """仅在配置边界检查会改变实验定义的选项。"""
+    task = get_task(config.get("task", "direction"))
+    if task.name == "existence":
+        if config["graph"]["enabled"] or "G" in config["branches"]:
+            raise ValueError("Existence task does not support graph expert G")
+        if config["model"]["head"] == "bart_slots" and config["model"]["slot_relation_weight"] != 0:
+            raise ValueError("Existence bart_slots requires slot_relation_weight=0")
     choices = {
         "head": (config["model"]["head"], {"bert_mlm", "bert_cls", "bart_relation", "bart_slots"}),
         "rule": (config["rules"]["mode"], {"scope", "lexical"}),

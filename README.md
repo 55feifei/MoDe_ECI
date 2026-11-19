@@ -58,6 +58,33 @@ python -m mode_eci --config configs/bert_mlm.yaml prepare-data --download
 
 输出 `documents.jsonl/pairs.jsonl/splits.json/statistics.json`。标签顺序固定为 `NONE / E1_TO_E2 / E2_TO_E1`；`Corpus.query()` 不携带 gold。正式开发和测试保留全部候选及自然类别比例。
 
+## 独立的因果存在性训练
+
+配置新增 `task: direction | existence`，不填写时保持方向三分类。`existence` 将原始两个方向标签都映射为 `CAUSAL`，输出顺序固定为 `NONE / CAUSAL`。数据文件、划分、检索示例 ID、顺序和数量沿用方向实验；demo 只显示有无因果，三示例仍是一个负例、两个正例。`shuffle_labels` 翻转二分类标签。
+
+四种输出头均支持独立二分类训练，覆盖 D_all、D1–D4、C/S/M、OOF 和 G1/G2/G3。BART 角色槽位头在训练中对两个方向做概率边缘化，只接受有无因果监督，要求 `model.slot_relation_weight: 0`。存在性任务暂不支持图专家 G。默认按二分类 argmax 判决，按开发集存在性 F1、再按二分类 NLL 选 checkpoint。
+
+与当前 RoBERTa+D_all 实验匹配的配置为 `configs/roberta_mlm_existence_dall_seed3407_gpu.yaml`。在具备 CUDA 和模型资产的环境中运行：
+
+```powershell
+$python = "F:\MoDE_ECI_research\.venv\Scripts\python.exe"
+& $python scripts/run_demo_pretraining.py --config configs/roberta_mlm_existence_dall_seed3407_gpu.yaml --fold 0 --output runs/roberta_existence_dall_seed3407_gpu
+```
+
+也可从任一现有模型配置生成独立实验，并沿用分阶段训练命令：
+
+```bash
+python scripts/create_config.py --base configs/bart_slots.yaml --output configs/bart_slots_existence.yaml --task existence
+python -m mode_eci --config configs/bart_slots_existence.yaml --fold 0 run --split dev
+python -m mode_eci --config configs/bart_slots_existence.yaml --fold 0 predict --split test --fusion learned --objective G3
+```
+
+存在性报告提供 overall、intra、cross、D1–D4 及距离分组的 Precision/Recall/F1、AP、NLL、Brier 和可靠性，不报告方向成绩。任务和标签顺序写入 checkpoint、OOF、预测及清单，禁止混用；旧产物缺少任务字段时按方向解释。更改代码后仍需新实验 ID，原有产物不会被自动迁移。
+
+配对比较方向模型与独立存在性模型时显式使用 `compare --metric existence`。方向模型投影为 `[p(NONE), p(E1→E2)+p(E2→E1)]`，预测标签按是否为 NONE 映射，保留其已有判决。`summarize` 只汇总同一训练任务的预测。`decode --mode existence` 对二分类正例概率使用开发阶段固定的阈值；存在性模型不能使用 `--mode paper`。
+
+`verify-local` 同样支持存在性配置，使用微型随机模型验收，不生成研究成绩或执行正式多折训练。
+
 ## 单专家比较
 
 四种输出头的配置为 `bert_cls.yaml`、`bert_mlm.yaml`、`bart_relation.yaml`、`bart_slots.yaml`；另有 `bart_large.yaml` 和 `roberta_mlm.yaml`。先用 S 视角比较 B0 至 B3：

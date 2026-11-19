@@ -1,7 +1,7 @@
 """确定性证据裁剪和输入模板，训练与推理共用。"""
 
-from .data import LABELS
 from .features import event_sentences, marked_tokens
+from .tasks import get_task
 
 EVENT_TOKENS = ["<E1>", "</E1>", "<E2>", "</E2>"]
 RELATION_TOKENS = ["[REL_NONE]", "[REL_12]", "[REL_21]"]
@@ -9,8 +9,8 @@ ROLE_TOKENS = ["<None>", "<SLOT>", "<QUERY>"]
 STATEMENTS = ["<None> causes <None>.", "<E1> causes <E2>.", "<E2> causes <E1>."]
 
 
-def register_tokens(tokenizer):
-    tokenizer.add_special_tokens({"additional_special_tokens": EVENT_TOKENS + RELATION_TOKENS + ROLE_TOKENS})
+def register_tokens(tokenizer, task="direction"):
+    tokenizer.add_special_tokens({"additional_special_tokens": EVENT_TOKENS + list(get_task(task).relation_tokens) + ROLE_TOKENS})
 
 
 def context_text(query, selected):
@@ -84,17 +84,18 @@ def crop_context(query, sentence_ids, fits):
 
 
 class InputBuilder:
-    def __init__(self, tokenizers, head, settings):
+    def __init__(self, tokenizers, head, settings, task="direction"):
         self.tokenizers = tokenizers
         self.head = head
         self.settings = settings
+        self.task = get_task(task)
         self.demo_cache = {}
 
     def fits(self, text, maximum):
         # 共同证据预算按较长的陈述式 demo 计数；BERT/BART 不因输出标签
         # 长短不同而保留不同的原文片段。两个 tokenizer 也须共同满足上限。
         canonical = text
-        for relation, statement in zip(RELATION_TOKENS, STATEMENTS):
+        for relation, statement in zip(self.task.relation_tokens, self.task.statements):
             canonical = canonical.replace(relation, statement)
         if self.tokenizers[0].mask_token is not None:
             canonical = canonical.replace(self.tokenizers[0].mask_token, "<SLOT>")
@@ -104,10 +105,10 @@ class InputBuilder:
         return True
 
     def relation(self, label):
-        return STATEMENTS[label] if self.head == "bart_slots" else RELATION_TOKENS[label]
+        return self.task.statements[label] if self.head == "bart_slots" else self.task.relation_tokens[label]
 
     def demo(self, record, position, label=None):
-        label = record["label"] if label is None else label
+        label = self.task.label(record["label"]) if label is None else label
         key = (record["pair_id"], position, label)
         if key not in self.demo_cache:
             prefix = f"Example {position}: "
@@ -121,6 +122,8 @@ class InputBuilder:
     def build(self, query, branch, features, demos=(), graph_text="", demo_labels=None):
         tokenizer = self.tokenizers[0]
         instruction = "Task: Identify the causal relation between E1 and E2.\n"
+        if self.task.name == "existence":
+            instruction = "Task: Determine whether a causal relation exists between E1 and E2, regardless of direction.\n"
         demo_sections, demo_coverage = [], []
         for i, record in enumerate(demos):
             label = None if demo_labels is None else demo_labels[i]

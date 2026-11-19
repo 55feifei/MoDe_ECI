@@ -6,6 +6,7 @@ import numpy as np
 from sklearn.metrics import average_precision_score
 
 from .data import LABELS
+from .tasks import get_task, records_task
 
 
 def prf(gold, predicted, directional=False, *, reverse_as_fp_only=False):
@@ -25,12 +26,12 @@ def prf(gold, predicted, directional=False, *, reverse_as_fp_only=False):
             "precision": precision, "recall": recall, "f1": f1, "defined": defined}
 
 
-def validation_metrics(gold, probabilities):
-    gold = np.asarray(gold)
-    probabilities = np.asarray(probabilities)
-    direction = prf(gold, probabilities.argmax(-1), True)
-    nll = float(-np.log(np.maximum(probabilities[np.arange(len(gold)), gold], 1e-12)).mean())
-    return {"direction_f1": direction["f1"] if direction["defined"] else 0.0, "nll": nll}
+def validation_metrics(gold, probabilities, task="direction"):
+    task = get_task(task)
+    result = metrics([task.label(label) for label in gold], probabilities, task=task)
+    primary = result[task.name]["f1"]
+    return {"selection_f1": primary if primary is not None else 0.0,
+            f"{task.name}_f1": primary if primary is not None else 0.0, "nll": result["nll"]}
 
 
 def reliability(probabilities, outcomes, bins=10):
@@ -46,59 +47,71 @@ def reliability(probabilities, outcomes, bins=10):
     return {"ece": ece, "bins": rows}
 
 
-def metrics(gold, probabilities, labels=None):
-    gold, probabilities = np.asarray(gold), np.asarray(probabilities, dtype=float)
-    labels = probabilities.argmax(-1) if labels is None else np.asarray(labels)
-    if probabilities.shape != (len(gold), 3) or not np.isfinite(probabilities).all() or np.any(probabilities < 0):
-        raise ValueError("Invalid three-class probabilities")
+def metrics(gold, probabilities, labels=None, task="direction"):
+    task = get_task(task)
+    gold, probabilities = np.asarray(gold, dtype=int), np.asarray(probabilities, dtype=float)
+    if probabilities.shape != (len(gold), task.num_labels) or not np.isfinite(probabilities).all() or np.any(probabilities < 0):
+        raise ValueError(f"Invalid {task.num_labels}-class probabilities")
     if not np.allclose(probabilities.sum(-1), 1, atol=1e-5):
         raise ValueError("Probabilities must sum to one")
-    result = {"n": len(gold),
-              "direction": prf(gold, labels, directional=True),
-              "direction_fp_only": prf(gold, labels, directional=True, reverse_as_fp_only=True),
-              "existence": prf(gold, labels)}
+    labels = probabilities.argmax(-1) if labels is None else np.asarray(labels)
+    if labels.shape != gold.shape or not np.isin(gold, range(task.num_labels)).all() or not np.isin(labels, range(task.num_labels)).all():
+        raise ValueError("Invalid task labels")
+    result = {"n": len(gold), "existence": prf(gold, labels)}
+    if task.name == "direction":
+        result.update(direction=prf(gold, labels, directional=True),
+                      direction_fp_only=prf(gold, labels, directional=True, reverse_as_fp_only=True))
     if not len(gold):
+        if task.name == "existence":
+            result.update(nll=None, brier=None, existence_average_precision=None, class_reliability={})
         return result
-    onehot = np.eye(3)[gold]
+    onehot = np.eye(task.num_labels)[gold]
     result.update(nll=float(-np.log(np.maximum(probabilities[np.arange(len(gold)), gold], 1e-12)).mean()),
                   brier=float(np.sum((probabilities - onehot) ** 2, axis=1).mean()),
                   existence_average_precision=float(average_precision_score(gold != 0, probabilities[:, 1:].sum(-1))) if np.any(gold) else None,
-                  class_reliability={name: reliability(probabilities[:, i], gold == i) for i, name in enumerate(LABELS)})
+                  class_reliability={name: reliability(probabilities[:, i], gold == i) for i, name in enumerate(task.labels)})
     return result
 
 
-def align_predictions(pairs, predictions):
+def align_predictions(pairs, predictions, task=None):
     expected = {p["pair_id"] for p in pairs}
     by_id = {p["pair_id"]: p for p in predictions}
     if len(by_id) != len(predictions) or set(by_id) != expected:
         raise ValueError("Predictions missing, duplicated, or outside evaluation manifest")
-    if any(row["status"] != "success" or row["label"] not in (0, 1, 2) for row in predictions):
+    specification = records_task(predictions, task)
+    if any(row["status"] != "success" or row["label"] not in range(specification.num_labels) for row in predictions):
         raise ValueError("Failed predictions cannot be scored as NONE")
     return [by_id[p["pair_id"]] for p in pairs]
 
 
-def evaluate(pairs, predictions):
-    predictions = align_predictions(pairs, predictions)
-    gold = np.array([p["label"] for p in pairs])
-    probabilities = np.array([p["probabilities"] for p in predictions]) if predictions else np.empty((0, 3))
+def evaluate(pairs, predictions, task=None):
+    task = records_task(predictions, task)
+    predictions = align_predictions(pairs, predictions, task)
+    gold = np.array([task.label(p["label"]) for p in pairs], dtype=int)
+    probabilities = np.array([p["probabilities"] for p in predictions]) if predictions else np.empty((0, task.num_labels))
     labels = np.array([p["label"] for p in predictions])
     groups = defaultdict(list, overall=[], intra=[], cross=[])
+    if task.name == "existence":
+        groups.update({branch: [] for branch in ("D1", "D2", "D3", "D4")})
     for index, row in enumerate(predictions):
         feature = row["features"]
         for name in ("overall", feature["demo_cell"], "intra" if feature["sentence_distance"] == 0 else "cross",
-                     f"distance_{feature['distance_bucket']}", f"label_{LABELS[gold[index]]}"):
+                     f"distance_{feature['distance_bucket']}", f"label_{task.labels[gold[index]]}"):
             groups[name].append(index)
-    report = {name: metrics(gold[indices], probabilities[indices], labels[indices]) for name, indices in groups.items()}
+    report = {name: metrics(gold[indices], probabilities[indices], labels[indices], task) for name, indices in groups.items()}
+    report.update(task.metadata())
     report["test_only"] = any(p["test_only"] for p in predictions)
     report["coverage"] = 1.0
-    report["label_counts"] = dict(Counter(LABELS[p["label"]] for p in pairs))
-    report["complementarity"] = complementarity(pairs, predictions)
-    report["input_diagnostics"] = input_diagnostics(predictions)
+    report["label_counts"] = dict(Counter(task.labels[label] for label in gold))
+    report["complementarity"] = complementarity(pairs, predictions, task)
+    report["input_diagnostics"] = input_diagnostics(predictions, task)
     return report
 
 
-def input_diagnostics(predictions):
+def input_diagnostics(predictions, task="direction"):
+    task = get_task(task)
     truncated, counts, following, missing = Counter(), Counter(), Counter(), Counter()
+    missing_strata = Counter()
     for row in predictions:
         for branch, expert in row["experts"].items():
             counts[branch] += 1
@@ -106,28 +119,35 @@ def input_diagnostics(predictions):
             plan = expert["retrieval"]
             if plan is not None:
                 for label in plan["missing_labels"]:
-                    missing[LABELS[label]] += 1
-                if plan["demos"]:
+                    missing_strata[LABELS[label]] += 1
+                present = {task.label(d["label"]) for d in plan["demos"]}
+                for label in {task.label(label) for label in plan["missing_labels"]} - present:
+                    missing[task.labels[label]] += 1
+                displayed = plan.get("displayed_labels", [task.label(d["label"]) for d in plan["demos"]])
+                if displayed:
                     following["n"] += 1
-                    following["last_demo_label_matches_expert"] += int(np.argmax(expert["probabilities"])) == plan["demos"][-1]["label"]
+                    following["last_demo_label_matches_expert"] += int(np.argmax(expert["probabilities"])) == displayed[-1]
     return {"expert_availability": {branch: count / len(predictions) for branch, count in counts.items()},
             "truncation_rate": {branch: truncated[branch] / count for branch, count in counts.items()},
-            "demo_missing_labels": dict(missing), "last_demo_follow_counts": dict(following)}
+            "demo_missing_labels": dict(missing), "demo_missing_strata": dict(missing_strata),
+            "last_demo_follow_counts": dict(following)}
 
 
-def complementarity(pairs, predictions):
+def complementarity(pairs, predictions, task="direction"):
+    task = get_task(task)
     coverage = Counter()
     class_coverage = defaultdict(Counter)
     weights, errors = defaultdict(list), defaultdict(list)
     for pair, row in zip(pairs, predictions):
+        gold_label = task.label(pair["label"])
         flags = []
         for branch, expert in row["experts"].items():
-            correct = int(np.argmax(expert["probabilities"])) == pair["label"]
+            correct = int(np.argmax(expert["probabilities"])) == gold_label
             flags.append(correct)
             errors[branch].append((pair["pair_id"], int(not correct)))
         name = "all_correct" if all(flags) else ("all_wrong" if not any(flags) else "mixed")
         coverage[name] += 1
-        class_coverage[LABELS[pair["label"]]][name] += 1
+        class_coverage[task.labels[gold_label]][name] += 1
         for branch, weight in zip(row["branches"], row["weights"]):
             weights[(row["features"]["demo_cell"], branch)].append(weight)
     correlations = {}
@@ -143,8 +163,17 @@ def complementarity(pairs, predictions):
             "mean_weights_by_cell": {f"{cell}:{branch}": float(np.mean(values)) for (cell, branch), values in weights.items()}}
 
 
-def bootstrap(pairs, first, second, repeats=2000, seed=209, by_topic=False):
+def bootstrap(pairs, first, second, repeats=2000, seed=209, by_topic=False, metric=None):
     first, second = align_predictions(pairs, first), align_predictions(pairs, second)
+    first_task, second_task = records_task(first), records_task(second)
+    if metric is None:
+        if first_task != second_task:
+            raise ValueError("Cross-task comparison requires --metric existence")
+        metric = first_task.name
+    if metric not in ("direction", "existence"):
+        raise ValueError(f"Unknown comparison metric: {metric}")
+    if metric == "direction" and (first_task.name != "direction" or second_task.name != "direction"):
+        raise ValueError("Direction comparison requires direction predictions")
     documents = defaultdict(list)
     for i, pair in enumerate(pairs):
         key = pair["doc_id"].split("_", 1)[0] if by_topic else pair["doc_id"]
@@ -154,18 +183,20 @@ def bootstrap(pairs, first, second, repeats=2000, seed=209, by_topic=False):
         gold = [pairs[i]["label"] for i in indices]
         row = []
         for predictions in (first, second):
-            result = prf(gold, [predictions[i]["label"] for i in indices], True)
+            result = prf(gold, [predictions[i]["label"] for i in indices], metric == "direction")
             row.append([result[k] for k in ("tp", "fp", "fn")])
         counts.append(row)
-    counts = np.array(counts)
+    counts = np.array(counts).reshape(-1, 2, 3)
     randomizer = np.random.default_rng(seed)
     differences = []
     for _ in range(repeats):
+        if not len(counts):
+            break
         sample = counts[randomizer.integers(0, len(counts), len(counts))].sum(0)
         denominator = 2 * sample[:, 0] + sample[:, 1] + sample[:, 2]
         if np.all(denominator):
             f1 = 2 * sample[:, 0] / denominator
             differences.append(f1[1] - f1[0])
-    return {"unit": "topic" if by_topic else "document", "repeats": repeats, "valid_repeats": len(differences),
-            "delta_direction_f1_interval_95": np.quantile(differences, [0.025, 0.975]).tolist() if differences else None,
+    return {"metric": metric, "unit": "topic" if by_topic else "document", "repeats": repeats, "valid_repeats": len(differences),
+            f"delta_{metric}_f1_interval_95": np.quantile(differences, [0.025, 0.975]).tolist() if differences else None,
             "seed": seed}

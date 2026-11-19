@@ -1,4 +1,4 @@
-"""统一三类接口的 BERT MLM、事件 MLP、BART 关系和角色槽位专家。"""
+"""支持方向与存在性任务的 BERT MLM、事件 MLP、BART 专家。"""
 
 from pathlib import Path
 
@@ -8,7 +8,8 @@ from torch.nn import functional as F
 from transformers import AutoModel, AutoModelForMaskedLM, AutoModelForSeq2SeqLM, AutoTokenizer
 
 from .io import checkpoint_fingerprint, read_json, write_json
-from .prompts import RELATION_TOKENS, register_tokens
+from .prompts import register_tokens
+from .tasks import get_task
 
 
 def collate(rows, tokenizer):
@@ -24,17 +25,20 @@ def collate(rows, tokenizer):
 
 
 class Expert(nn.Module):
-    def __init__(self, backbone, tokenizer, head, temperature=1.0, slot_relation_weight=0.0):
+    def __init__(self, backbone, tokenizer, head, temperature=1.0, slot_relation_weight=0.0, task="direction"):
         super().__init__()
         self.backbone = backbone
         self.tokenizer = tokenizer
         self.head = head
         self.temperature = temperature
         self.slot_relation_weight = slot_relation_weight
-        self.relation_ids = tokenizer.convert_tokens_to_ids(RELATION_TOKENS)
+        self.task = get_task(task)
+        if self.task.name == "existence" and head == "bart_slots" and slot_relation_weight != 0:
+            raise ValueError("Existence bart_slots requires slot_relation_weight=0")
+        self.relation_ids = tokenizer.convert_tokens_to_ids(list(self.task.relation_tokens))
         if head == "bert_cls":
             hidden = backbone.config.hidden_size
-            self.classifier = nn.Sequential(nn.Linear(2 * hidden, hidden), nn.GELU(), nn.Dropout(0.1), nn.Linear(hidden, 3))
+            self.classifier = nn.Sequential(nn.Linear(2 * hidden, hidden), nn.GELU(), nn.Dropout(0.1), nn.Linear(hidden, self.task.num_labels))
         if head.startswith("bart"):
             template = "In this context, <SLOT> causes <SLOT>." if head == "bart_slots" else "Relation: <SLOT>."
             target_template = tokenizer.encode(template, add_special_tokens=True)
@@ -45,9 +49,9 @@ class Expert(nn.Module):
             self.role_ids = tokenizer.convert_tokens_to_ids(["<None>", "<E1>", "<E2>"])
 
     @classmethod
-    def create(cls, settings):
+    def create(cls, settings, task="direction"):
         tokenizer = AutoTokenizer.from_pretrained(settings["name"], revision=settings["revision"])
-        register_tokens(tokenizer)
+        register_tokens(tokenizer, task)
         head = settings["head"]
         loader = AutoModelForMaskedLM if head == "bert_mlm" else (AutoModel if head == "bert_cls" else AutoModelForSeq2SeqLM)
         backbone = loader.from_pretrained(settings["name"], revision=settings["revision"])
@@ -55,7 +59,7 @@ class Expert(nn.Module):
         if settings["gradient_checkpointing"]:
             backbone.gradient_checkpointing_enable()
             backbone.config.use_cache = False
-        return cls(backbone, tokenizer, head, settings["temperature"], settings["slot_relation_weight"])
+        return cls(backbone, tokenizer, head, settings["temperature"], settings["slot_relation_weight"], task)
 
     def forward(self, batch, labels=None):
         inputs = {k: v for k, v in batch.items() if k in self.tokenizer.model_input_names}
@@ -89,7 +93,11 @@ class Expert(nn.Module):
                 scores = log_probs[:, 0, pairs[:, 0]] + log_probs[:, 1, pairs[:, 1]]
                 detail = {"slot_token_probabilities": log_probs[:, :, self.role_ids].exp(), "combination_scores": scores}
                 loss = None
-                if labels is not None:
+                if self.task.name == "existence":
+                    # 两种方向是潜在状态，gold 仅监督两者的总概率。
+                    scores = torch.stack((scores[:, 0], scores[:, 1:].logsumexp(-1)), dim=-1)
+                    loss = None if labels is None else F.cross_entropy(scores, labels)
+                elif labels is not None:
                     targets = pairs[labels]
                     loss = F.cross_entropy(logits.flatten(0, 1), targets.flatten())
                     loss = loss + self.slot_relation_weight * F.cross_entropy(scores, labels)
@@ -101,20 +109,22 @@ class Expert(nn.Module):
         self.tokenizer.save_pretrained(directory / "tokenizer")
         if self.head == "bert_cls":
             torch.save(self.classifier.state_dict(), directory / "classifier.pt")
-        write_json(directory / "expert.json", {"head": self.head, "temperature": self.temperature,
+        write_json(directory / "expert.json", {**self.task.metadata(), "head": self.head, "temperature": self.temperature,
                                               "slot_relation_weight": self.slot_relation_weight,
                                               "relation_ids": self.relation_ids, "checkpoint_fingerprint": checkpoint_fingerprint(directory)})
 
     @classmethod
-    def load(cls, directory):
+    def load(cls, directory, task=None):
         directory = Path(directory)
         meta = read_json(directory / "expert.json")
+        specification = get_task(meta.get("task", "direction") if task is None else task)
+        specification.check(meta)
         if checkpoint_fingerprint(directory) != meta["checkpoint_fingerprint"]:
             raise ValueError("Expert checkpoint fingerprint differs")
         tokenizer = AutoTokenizer.from_pretrained(directory / "tokenizer")
         loader = AutoModelForMaskedLM if meta["head"] == "bert_mlm" else (AutoModel if meta["head"] == "bert_cls" else AutoModelForSeq2SeqLM)
         model = cls(loader.from_pretrained(directory / "backbone"), tokenizer, meta["head"],
-                    meta["temperature"], meta["slot_relation_weight"])
+                    meta["temperature"], meta["slot_relation_weight"], specification)
         if model.relation_ids != meta["relation_ids"]:
             raise ValueError("Relation token mapping changed")
         if meta["head"] == "bert_cls":

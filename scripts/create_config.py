@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--base", default="configs/bert_mlm.yaml")
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--task", choices=["direction", "existence"])
     parser.add_argument("--strategy", choices=["R0", "R1", "R2", "R3"])
     parser.add_argument("--pool", choices=["four", "single"])
     parser.add_argument("--demo-count", type=int, choices=[2, 3])
@@ -28,7 +29,7 @@ def main():
     parser.add_argument("--teacher-weight", type=float)
     args = parser.parse_args()
     config = yaml.safe_load(Path(args.base).read_text(encoding="utf-8"))
-    for flag, section, name in [("seed", None, "seed"), ("strategy", "retrieval", "strategy"), ("pool", "retrieval", "pool"),
+    for flag, section, name in [("seed", None, "seed"), ("task", None, "task"), ("strategy", "retrieval", "strategy"), ("pool", "retrieval", "pool"),
                                 ("demo_count", "retrieval", "demo_count"), ("rule", "rules", "mode"),
                                 ("branches", None, "branches"), ("review_file", "retrieval", "review_file"),
                                 ("learning_rate", "training", "learning_rate"), ("teacher_temperature", "gate", "teacher_temperature"),

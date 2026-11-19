@@ -12,6 +12,7 @@ from tokenizers.processors import TemplateProcessing
 from transformers import BartConfig, BartForConditionalGeneration, BertConfig, BertForMaskedLM, BertTokenizerFast, PreTrainedTokenizerFast
 
 from .io import code_fingerprint, read_json, read_jsonl, write_json, write_jsonl
+from .tasks import get_task
 
 
 def make_fixture(directory):
@@ -52,7 +53,7 @@ def make_tiny_models(directory):
     directory = Path(directory)
     torch.manual_seed(209)
     vocabulary = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"] + sorted(set(
-        "the explosion caused a fire blast shattered windows engine overheated as result it stopped pipe burst basement filled with water task identify causal relation between e1 e2 example query context in this event none sentence distance cell d1 d2 d3 d4 . : ; , ->".split()))
+        "the explosion caused a fire blast shattered windows engine overheated as result it stopped pipe burst basement filled with water task identify determine whether causal relation exists regardless of direction no and between e1 e2 example query context in this event none sentence distance cell d1 d2 d3 d4 . : ; , ->".split()))
     bert = directory / "tiny_bert"
     bert.mkdir(parents=True, exist_ok=True)
     (bert / "vocab.txt").write_text("\n".join(vocabulary), encoding="utf-8")
@@ -85,6 +86,8 @@ def fixture_config(base, directory, head="bert_mlm"):
     data = make_fixture(directory / "data")
     bert, bart = make_tiny_models(directory / "models")
     config.update(experiment_id=f"test_only_{head}", test_only=True, data_dir=str(data), output_dir=str(directory / "artifacts"), inner_folds=2)
+    if config.get("task", "direction") == "existence":
+        config["experiment_id"] += "_existence"
     config["rules"]["mode"] = "lexical"
     config["model"].update(name=str(bart if head.startswith("bart") else bert), revision=None, head=head)
     config["gate"].update(name=str(bert), revision=None, epochs=1, patience=1, hidden_size=16)
@@ -95,11 +98,13 @@ def fixture_config(base, directory, head="bert_mlm"):
 
 def verify_local(base, directory):
     from .pipeline import Experiment
+    task = get_task(base.get("task", "direction"))
     summaries = []
     for head in ("bert_mlm", "bart_slots", "bert_cls", "bart_relation"):
         config = fixture_config(base, directory, head)
         if head in ("bert_cls", "bart_relation"):
             config["branches"] = ["S"]
+            config["model"]["demo_pretraining"] = False
         experiment = Experiment(config, "0")
         if len(config["branches"]) > 1:
             experiment.run()
@@ -111,9 +116,20 @@ def verify_local(base, directory):
             experiment.train_experts()
         location, report = experiment.predict("test", "equal")
         summaries.append({"head": head, "test_only": report["test_only"], "coverage": report["coverage"], "results": str(location)})
-    # 连通的教学候选图用于验收嵌套种子流程，不修改主验收数据。
+    if task.name == "direction":
+        summaries.append(verify_graph(base, directory))
+    result = {**task.metadata(), "status": "test_only", "code_fingerprint": code_fingerprint(),
+              "description": "Micro-model software verification; metrics are not research results", "systems": summaries}
+    write_json(Path(directory) / "verification.json", result)
+    return result
+
+
+def verify_graph(base, directory):
+    """连通的教学候选图用于验收方向任务的嵌套种子流程。"""
+    from .pipeline import Experiment
     config = fixture_config(base, Path(directory) / "graph", "bert_mlm")
     config["branches"] = ["S", "G"]
+    config["model"]["demo_pretraining"] = False
     config["graph"].update(enabled=True, threshold=0.0)
     documents = list(read_jsonl(Path(config["data_dir"]) / "documents.jsonl"))
     pairs = []
@@ -126,8 +142,4 @@ def verify_local(base, directory):
     graph_experiment.run(objectives=("G3",))
     location, graph_report = graph_experiment.predict("test", "learned", "G3")
     assert graph_report["input_diagnostics"]["expert_availability"]["G"] > 0
-    summaries.append({"head": "bert_mlm_nested_graph", "test_only": True, "coverage": graph_report["coverage"], "results": str(location)})
-    result = {"status": "test_only", "code_fingerprint": code_fingerprint(),
-              "description": "Micro-model software verification; metrics are not research results", "systems": summaries}
-    write_json(Path(directory) / "verification.json", result)
-    return result
+    return {"head": "bert_mlm_nested_graph", "test_only": True, "coverage": graph_report["coverage"], "results": str(location)}

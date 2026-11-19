@@ -10,7 +10,9 @@ from mode_eci.reporting import compare_files, summarize_files
 
 
 def load_fixture_experiment(directory):
-    root = Path(directory) / "artifacts" / "test_only_bart_slots" / "seed_209" / "fold_0"
+    verification = read_json(Path(directory) / "verification.json")
+    system = next(row for row in verification["systems"] if row["head"] == "bart_slots")
+    root = Path(system["results"]).parent.parent
     config = read_json(root / "manifest.json")["expert_config"]
     gate_checkpoint = next((root / "gates").glob("G3_*/checkpoint/gate.json"))
     config["gate"] = read_json(gate_checkpoint)["settings"]
@@ -34,18 +36,23 @@ def main():
     assert report["coverage"] == 1
     summary = summarize_files(experiment.config, [equal / "predictions.jsonl"], directory / "summary.json")
     comparison = compare_files(experiment.config, equal / "predictions.jsonl", learned / "predictions.jsonl", directory / "bootstrap.json")
-    decoded = decode_file(experiment.config, equal / "predictions.jsonl", directory / "paper_decoding", "paper", .5, "S")
+    mode = "paper" if experiment.task.name == "direction" else "existence"
+    decoded = decode_file(experiment.config, equal / "predictions.jsonl", directory / "decoding", mode, .5, "S" if mode == "paper" else None)
     experiment.expert_predictions("inner-0", experiment.test_docs, "test")
     calibration = calibrate_records(experiment.config, experiment.root / "inner-0/predictions/held/records.jsonl",
                                     experiment.root / "inner-0/predictions/test/records.jsonl", directory / "calibration")
-    graph_root = directory / "graph/artifacts/test_only_bert_mlm/seed_209/fold_0"
-    config = read_json(graph_root / "manifest.json")["expert_config"]
-    config["gate"] = read_json(next((graph_root / "gates").glob("G3_*/checkpoint/gate.json")))["settings"]
-    graph = Experiment(config, "0")
-    _, graph_report = graph.predict("dev", "learned", "G3", demo_variant="shuffle_graph")
-    result = {"status": "test_only", "summary": summary["test_only"], "bootstrap": comparison["test_only"],
-              "paper_decode": decoded["test_only"], "calibrated_branches": list(calibration["fits"]),
-              "shuffle_graph_coverage": graph_report["coverage"], "diagnostics": ["no_demo", "shuffle_labels", "top2", "drop_M"]}
+    result = {**experiment.task.metadata(), "status": "test_only", "summary": summary["test_only"], "bootstrap": comparison["test_only"],
+              f"{mode}_decode": decoded["test_only"], "calibrated_branches": list(calibration["fits"]),
+              "diagnostics": ["no_demo", "shuffle_labels", "top2", "drop_M"]}
+    if experiment.task.name == "direction":
+        verification = read_json(directory / "verification.json")
+        system = next(row for row in verification["systems"] if row["head"] == "bert_mlm_nested_graph")
+        graph_root = Path(system["results"]).parent.parent
+        config = read_json(graph_root / "manifest.json")["expert_config"]
+        config["gate"] = read_json(next((graph_root / "gates").glob("G3_*/checkpoint/gate.json")))["settings"]
+        graph = Experiment(config, "0")
+        _, graph_report = graph.predict("dev", "learned", "G3", demo_variant="shuffle_graph")
+        result["shuffle_graph_coverage"] = graph_report["coverage"]
     write_json(directory / "reporting_verification.json", result)
     print(result)
 

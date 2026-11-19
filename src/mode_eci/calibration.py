@@ -11,6 +11,7 @@ from .data import Corpus
 from .evaluation import evaluate
 from .experts import paper_decode
 from .io import digest, read_json, read_jsonl, write_json, write_jsonl
+from .tasks import get_task, records_task
 
 
 def fit_temperature(scores, labels):
@@ -41,10 +42,15 @@ def calibrate_records(config, calibration_path, prediction_path, output, fold="0
     专家记录；下游门控若使用这些分布，需要在相同校准协议下重新训练。
     """
     corpus = Corpus(config["data_dir"])
+    task = get_task(config.get("task", "direction"))
     calibration = list(read_jsonl(calibration_path))
     prediction = list(read_jsonl(prediction_path))
     calibration_meta = read_json(Path(calibration_path).parent / "manifest.json")
     prediction_meta = read_json(Path(prediction_path).parent / "manifest.json")
+    for meta in (calibration_meta, prediction_meta):
+        task.check(meta)
+    records_task(calibration, task)
+    records_task(prediction, task)
     if any(calibration_meta[key] != prediction_meta[key] for key in ("train_documents", "scope", "experiment")):
         raise ValueError("Calibration and evaluation require the same frozen expert source")
     calibration_docs = {r["doc_id"] for r in calibration}
@@ -61,7 +67,10 @@ def calibrate_records(config, calibration_path, prediction_path, output, fold="0
         rows = [r for r in calibration if branch in r["experts"]]
         if not rows:
             raise ValueError(f"No calibration coverage for {branch}")
-        fitted[branch] = fit_temperature([r["experts"][branch]["scores"] for r in rows], [corpus.by_id[r["pair_id"]]["label"] for r in rows])
+        scores = [r["experts"][branch]["scores"] for r in rows]
+        for values in scores:
+            task.check_probabilities(values)
+        fitted[branch] = fit_temperature(scores, [task.label(corpus.by_id[r["pair_id"]]["label"]) for r in rows])
     result = copy.deepcopy(prediction)
     for row in result:
         for branch, expert in row["experts"].items():
@@ -69,7 +78,7 @@ def calibrate_records(config, calibration_path, prediction_path, output, fold="0
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     write_jsonl(output / "records.jsonl", result)
-    manifest = {"fits": fitted, "calibration_documents": sorted(calibration_docs), "evaluation_documents": sorted(evaluation_docs),
+    manifest = {**task.metadata(), "fits": fitted, "calibration_documents": sorted(calibration_docs), "evaluation_documents": sorted(evaluation_docs),
                 "source": prediction_meta, "calibration_fingerprint": digest(calibration)}
     write_json(output / "calibration.json", manifest)
     return manifest
@@ -79,6 +88,13 @@ def decode_file(config, path, output, mode, threshold, branch=None):
     """阈值应在开发阶段固定；本命令不在测试集搜索阈值。"""
     corpus = Corpus(config["data_dir"])
     predictions = copy.deepcopy(list(read_jsonl(path)))
+    task = records_task(predictions, config.get("task", "direction"))
+    if mode == "paper" and task.name == "existence":
+        raise ValueError("Paper direction decoding is unavailable for existence models")
+    if mode not in ("paper", "existence"):
+        raise ValueError(f"Unknown decoding mode: {mode}")
+    if mode == "existence" and not 0 <= threshold <= 1:
+        raise ValueError("Existence threshold must be in [0, 1]")
     for row in predictions:
         if mode == "paper":
             selected = row["features"]["demo_cell"] if branch == "D" else branch
@@ -89,13 +105,16 @@ def decode_file(config, path, output, mode, threshold, branch=None):
             row["weights"] = [float(b == selected) for b in row["branches"]]
         else:
             q = row["probabilities"]
-            row["label"] = (1 if q[1] >= q[2] else 2) if q[1] + q[2] >= threshold else 0
+            if task.name == "existence":
+                row["label"] = int(q[1] >= threshold)
+            else:
+                row["label"] = (1 if q[1] >= q[2] else 2) if q[1] + q[2] >= threshold else 0
         row["decision"] = {"mode": mode, "threshold": threshold, "branch": branch}
     ids = {r["pair_id"] for r in predictions}
     pairs = [p for p in corpus.pairs if p["pair_id"] in ids]
-    report = evaluate(pairs, predictions)
+    report = evaluate(pairs, predictions, task)
     directory = Path(output)
     write_jsonl(directory / "predictions.jsonl", predictions)
     write_json(directory / "metrics.json", report)
-    write_json(directory / "decision.json", {"mode": mode, "threshold": threshold, "branch": branch, "source": str(path)})
+    write_json(directory / "decision.json", {**task.metadata(), "mode": mode, "threshold": threshold, "branch": branch, "source": str(path)})
     return report

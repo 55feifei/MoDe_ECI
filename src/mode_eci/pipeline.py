@@ -9,15 +9,16 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from .data import Corpus, LABELS
+from .data import Corpus
 from .evaluation import evaluate, validation_metrics
 from .experts import Expert, collate
 from .features import RuleRouter, active_mask
 from .gate import QueryGate, gate_loss, masked_weights, teacher_targets
-from .io import claim_run, code_fingerprint, digest, model_identity, read_json, read_jsonl, write_json, write_jsonl
+from .io import claim_run, code_fingerprint, digest, model_identity, read_json, read_jsonl, validate_config, write_json, write_jsonl
 from .prompts import InputBuilder, register_tokens
 from .retrieval import DemoIndex, HashEncoder, MPNetEncoder
 from .training import device_name, fit, move_batch, predict_expert, seed_everything
+from .tasks import get_task, records_task
 
 
 def document_groups(corpus, documents, count, seed):
@@ -57,7 +58,9 @@ def release(model):
 
 class Experiment:
     def __init__(self, config, fold="0", encoder=None, training_documents=None):
+        validate_config(config)
         self.config = config
+        self.task = get_task(config.get("task", "direction"))
         self.fold = str(fold)
         self.corpus = Corpus(config["data_dir"])
         if self.corpus.test_only and not config["test_only"]:
@@ -77,7 +80,7 @@ class Experiment:
         self.root = Path(config["output_dir"]) / config["experiment_id"] / f"seed_{config['seed']}" / f"fold_{fold}"
         # 门控目标可在同一组冻结专家上比较。各门控另有完整配置清单。
         expert_config = {key: value for key, value in config.items() if key != "gate"}
-        claim_run(self.root, {"expert_config": expert_config, "code": code_fingerprint(), "corpus": self.corpus.fingerprint,
+        claim_run(self.root, {**self.task.metadata(), "expert_config": expert_config, "code": code_fingerprint(), "corpus": self.corpus.fingerprint,
                               "train_documents": self.train_docs, "dev_documents": self.dev_docs,
                               "test_documents": self.test_docs, "inner_groups": self.groups, "test_only": config["test_only"],
                               "assets": {section: model_identity(config[section]) for section in ("model", "gate", "retrieval")
@@ -89,7 +92,7 @@ class Experiment:
 
     def plan(self):
         demo_jobs = (len(self.groups) + 1) if self.config["model"].get("demo_pretraining", False) else 0
-        return {"root": str(self.root), "outer_fold": self.fold, "inner_groups": self.groups,
+        return {**self.task.metadata(), "root": str(self.root), "outer_fold": self.fold, "inner_groups": self.groups,
                 "expert_training_jobs": (len(self.groups) + 1) * len(self.config["branches"]) + demo_jobs,
                 "demo_pretraining_jobs": demo_jobs,
                 "train_pairs": len(self.corpus.pairs_for(self.train_docs)), "dev_pairs": len(self.corpus.pairs_for(self.dev_docs)),
@@ -162,9 +165,9 @@ class Experiment:
         tokenizers = [tokenizer]
         for specification in self.config["input"]["comparison_tokenizers"]:
             other = AutoTokenizer.from_pretrained(specification["name"], revision=specification["revision"])
-            register_tokens(other)
+            register_tokens(other, self.task)
             tokenizers.append(other)
-        return InputBuilder(tokenizers, head, self.config["input"])
+        return InputBuilder(tokenizers, head, self.config["input"], self.task)
 
     def expert_rows(self, context, documents, branch, builder, demo_variant="normal", graphs=None):
         features = self.get_features()
@@ -182,19 +185,22 @@ class Experiment:
                 demos = [context["index"].by_id[d["pair_id"]] for d in plan["demos"]]
                 if demo_variant == "no_demo":
                     demos = []
+                    plan = dict(plan, displayed_labels=[])
             graph_text = "" if graphs is None else graphs[pair["pair_id"]]
             if branch == "G" and not graph_text:
                 continue
             labels = None
             if demo_variant == "shuffle_labels":
-                labels = [(d["label"] + 1) % 3 for d in demos]
+                labels = [(self.task.label(d["label"]) + 1) % self.task.num_labels for d in demos]
+                if plan is not None:
+                    plan = dict(plan, displayed_labels=labels)
             # 通用专家沿用每条查询所属分支的检索及模板，只有参数共享。
             input_branch = feature["demo_cell"] if branch == "D_all" else branch
             built = builder.build(query, input_branch, feature, demos, graph_text, labels)
             if branch == "G" and built["coverage"]["graph_edges_retained"] == 0:
                 continue
             rows.append(dict(built, pair_id=pair["pair_id"], doc_id=pair["doc_id"],
-                             demo_cell=feature["demo_cell"], label=pair["label"], retrieval=plan))
+                             demo_cell=feature["demo_cell"], label=self.task.label(pair["label"]), retrieval=plan))
         return rows
 
     def train_experts(self, scope="final", branches=None):
@@ -224,12 +230,12 @@ class Experiment:
             elif self.config["model"]["warmup"] and branch != "S":
                 initialization = warmup
             if initialization is not None:
-                model = Expert.load(initialization)
+                model = Expert.load(initialization, self.task)
                 if self.config["model"]["gradient_checkpointing"]:
                     model.backbone.gradient_checkpointing_enable()
                     model.backbone.config.use_cache = False
             else:
-                model = Expert.create(self.config["model"])
+                model = Expert.create(self.config["model"], self.task)
             builder = self.input_builder(model.tokenizer, model.head)
             rows = self.expert_rows(context, context["train"], branch, builder)
             validation = self.expert_rows(context, self.dev_docs, branch, builder)
@@ -240,7 +246,7 @@ class Experiment:
 
             def validate(current):
                 predictions = predict_expert(current, validation, self.config["training"])
-                return validation_metrics([r["label"] for r in validation], [r["probabilities"] for r in predictions])
+                return validation_metrics([r["label"] for r in validation], [r["probabilities"] for r in predictions], self.task)
 
             if not rows and demo_pretraining:
                 # 空分支没有可用监督，保留通用专家并显式记录，不能伪造微调样本。
@@ -254,7 +260,7 @@ class Experiment:
             else:
                 fit(model, rows, model.tokenizer, self.config["training"], self.config["seed"], destination, loss_fn,
                     validate if validation else None, lambda current: current.save(destination / "checkpoint"))
-            write_json(destination / "provenance.json", {"train_documents": context["train"], "branch": branch,
+            write_json(destination / "provenance.json", {**self.task.metadata(), "train_documents": context["train"], "branch": branch,
                                                         "initialization": None if initialization is None else str(initialization),
                                                         "initialization_fingerprint": None if initialization is None else read_json(initialization / "expert.json")["checkpoint_fingerprint"],
                                                         "training_pair_ids": [r["pair_id"] for r in rows],
@@ -279,7 +285,7 @@ class Experiment:
     def expert_predictions(self, scope, documents, name, demo_variant="normal", graphs=None):
         context = self.context(scope)
         directory = context["directory"] / "predictions" / name
-        identity = {"train_documents": context["train"], "prediction_documents": sorted(documents), "demo_variant": demo_variant,
+        identity = {**self.task.metadata(), "train_documents": context["train"], "prediction_documents": sorted(documents), "demo_variant": demo_variant,
                     "scope": scope, "branches": self.config["branches"], "test_only": self.config["test_only"],
                     "experiment": read_json(self.root / "manifest.json")["fingerprint"],
                     "index": None if context["index"] is None else context["index"].metadata["fingerprint"]}
@@ -289,11 +295,12 @@ class Experiment:
             records = list(read_jsonl(path))
             if digest(records) != read_json(directory / "complete.json")["records_sha256"]:
                 raise ValueError("Expert prediction fingerprint differs")
+            records_task(records, self.task)
             return records
         if "G" in self.config["branches"] and graphs is None:
             from .graph import graph_texts
             graphs = graph_texts(self, scope, documents, shuffled=demo_variant == "shuffle_graph")
-        combined = {p["pair_id"]: {"pair_id": p["pair_id"], "doc_id": p["doc_id"], "features": self.get_features()[p["pair_id"]],
+        combined = {p["pair_id"]: {**self.task.metadata(), "pair_id": p["pair_id"], "doc_id": p["doc_id"], "features": self.get_features()[p["pair_id"]],
                                     "experts": {}, "source_scope": scope, "test_only": self.config["test_only"]}
                     for p in self.corpus.pairs_for(documents)}
         for branch in self.config["branches"]:
@@ -303,7 +310,7 @@ class Experiment:
                 raise ValueError(f"Incomplete expert: {destination}")
             if branch == "G" and training_record.get("available") is False:
                 continue
-            model = Expert.load(destination / "checkpoint").to(device_name(self.config["training"]["device"]))
+            model = Expert.load(destination / "checkpoint", self.task).to(device_name(self.config["training"]["device"]))
             builder = self.input_builder(model.tokenizer, model.head)
             rows = self.expert_rows(context, documents, branch, builder, demo_variant, graphs)
             predictions = predict_expert(model, rows, self.config["training"])
@@ -333,13 +340,15 @@ class Experiment:
             raise ValueError("OOF predictions must cover every training pair exactly once")
         # 此文件没有 gold；只有门控监督构建步骤才读取 corpus 的标签。
         write_jsonl(self.root / "oof" / "records.jsonl", records)
-        write_json(self.root / "oof" / "provenance.json", {"sources": provenance, "count": len(records),
+        write_json(self.root / "oof" / "provenance.json", {**self.task.metadata(), "sources": provenance, "count": len(records),
                                                            "records_fingerprint": digest(records)})
         return records
 
     def supervised_oof(self):
         records = list(read_jsonl(self.root / "oof" / "records.jsonl"))
         provenance = read_json(self.root / "oof" / "provenance.json")
+        self.task.check(provenance)
+        records_task(records, self.task)
         if digest(records) != provenance["records_fingerprint"]:
             raise ValueError("OOF file fingerprint differs")
         sources = {r["scope"]: r for r in provenance["sources"]}
@@ -352,15 +361,16 @@ class Experiment:
                 raise ValueError("OOF document leakage")
             if not set(source["train_documents"]) <= set(self.train_docs):
                 raise ValueError("OOF source outside outer training set")
-        return [dict(r, label=self.corpus.by_id[r["pair_id"]]["label"]) for r in records]
+        return [dict(r, label=self.task.label(self.corpus.by_id[r["pair_id"]]["label"])) for r in records]
 
     def gate_rows(self, records, builder):
+        records_task(records, self.task)
         rows = []
         branches = self.config["branches"]
         for record in records:
             query = self.corpus.query(self.corpus.by_id[record["pair_id"]])
             built = builder.build(query, "gate", record["features"])
-            probabilities = [record["experts"][b]["probabilities"] if b in record["experts"] else [0.0] * 3 for b in branches]
+            probabilities = [record["experts"][b]["probabilities"] if b in record["experts"] else [0.0] * self.task.num_labels for b in branches]
             mask = [b in record["experts"] for b in branches]
             expected = active_mask(record["features"]["demo_cell"], branches, "G" in record["experts"])
             if mask != expected or not any(mask):
@@ -381,14 +391,14 @@ class Experiment:
     def train_gate(self, objective=None):
         settings = self.gate_settings(objective)
         directory = self.gate_directory(objective)
-        claim_run(directory, {"settings": settings, "oof": read_json(self.root / "oof" / "provenance.json"),
+        claim_run(directory, {**self.task.metadata(), "settings": settings, "oof": read_json(self.root / "oof" / "provenance.json"),
                               "experiment": read_json(self.root / "manifest.json")["fingerprint"]})
         if (directory / "refit" / "training.json").exists():
             return
         records = self.supervised_oof()
         seed_everything(self.config["seed"], self.config["training"]["cpu_threads"])
-        model = QueryGate.create(self.config["branches"], settings)
-        builder = InputBuilder([model.tokenizer], "bert_cls", self.config["input"])
+        model = QueryGate.create(self.config["branches"], settings, self.task)
+        builder = InputBuilder([model.tokenizer], "bert_cls", self.config["input"], self.task)
         rows = self.gate_rows(records, builder)
         groups = document_groups(self.corpus, self.train_docs, max(2, min(len(self.train_docs), round(1 / settings["validation_fraction"]))), self.config["seed"] + 1)
         validation_docs = set(groups[0])
@@ -397,12 +407,12 @@ class Experiment:
         training_settings = dict(self.config["training"], learning_rate=settings["learning_rate"], epochs=settings["epochs"], patience=settings["patience"])
         targets, covered = teacher_targets(torch.tensor([r["expert_probabilities"] for r in rows]),
                                             torch.tensor([r["label"] for r in rows]), torch.tensor([r["active_mask"] for r in rows]), settings["teacher_temperature"])
-        write_jsonl(directory / "supervision.jsonl", [{"pair_id": row["pair_id"], "label": row["label"],
+        write_jsonl(directory / "supervision.jsonl", [{**self.task.metadata(), "pair_id": row["pair_id"], "label": row["label"],
                                                        "teacher": target.tolist(), "covered": bool(flag)}
                                                       for row, target, flag in zip(rows, targets, covered)])
-        write_json(directory / "coverage.json", {"covered": int(covered.sum()), "total": len(rows),
+        write_json(directory / "coverage.json", {**self.task.metadata(), "covered": int(covered.sum()), "total": len(rows),
                                                 "by_gold": {label: {"n": sum(r["label"] == i for r in rows),
-                                                                    "covered": sum(bool(flag) for r, flag in zip(rows, covered) if r["label"] == i)} for i, label in enumerate(LABELS)}})
+                                                                    "covered": sum(bool(flag) for r, flag in zip(rows, covered) if r["label"] == i)} for i, label in enumerate(self.task.labels)}})
 
         def eligible(examples):
             if settings["objective"] != "G2":
@@ -417,7 +427,7 @@ class Experiment:
 
         def validate(current):
             fused, _ = self.gate_probabilities(current, validation)
-            return validation_metrics([r["label"] for r in validation], fused)
+            return validation_metrics([r["label"] for r in validation], fused, self.task)
 
         def parameter_groups(current):
             return [{"params": current.encoder.parameters(), "lr": settings["learning_rate"]},
@@ -427,7 +437,7 @@ class Experiment:
                         validate, lambda current: current.save(directory / "selection" / "checkpoint"), parameter_groups(model))
         release(model)
         seed_everything(self.config["seed"], training_settings["cpu_threads"])
-        model = QueryGate.create(self.config["branches"], settings)
+        model = QueryGate.create(self.config["branches"], settings, self.task)
         training_settings["epochs"] = selection["best_epoch"]
         fit(model, eligible(rows), model.tokenizer, training_settings, self.config["seed"], directory / "refit", loss_fn,
             None, lambda current: current.save(directory / "checkpoint"), parameter_groups(model))
@@ -467,8 +477,8 @@ class Experiment:
             raise ValueError("Drop learned experts requires retraining a gate with that branch removed")
         if fusion == "learned":
             objective = objective or self.config["gate"]["objective"]
-            gate = QueryGate.load(self.gate_directory(objective) / "checkpoint").to(device_name(self.config["training"]["device"]))
-            rows = self.gate_rows(modified, InputBuilder([gate.tokenizer], "bert_cls", self.config["input"]))
+            gate = QueryGate.load(self.gate_directory(objective) / "checkpoint", self.task).to(device_name(self.config["training"]["device"]))
+            rows = self.gate_rows(modified, InputBuilder([gate.tokenizer], "bert_cls", self.config["input"], self.task))
             probabilities, weights = self.gate_probabilities(gate, rows, top_k)
             release(gate)
         else:
@@ -491,14 +501,14 @@ class Experiment:
         if fusion == "learned":
             name += "_gate" + digest(self.gate_settings(objective))[:12]
         directory = self.root / "results" / name
-        claim_run(directory, {"split": split, "fusion": fusion, "objective": objective, "top_k": top_k,
+        claim_run(directory, {**self.task.metadata(), "split": split, "fusion": fusion, "objective": objective, "top_k": top_k,
                               "drop": drop, "demo_variant": demo_variant, "seed": self.config["seed"],
                               "fold": self.fold, "experiment_id": self.config["experiment_id"], "head": self.config["model"]["head"],
                               "gate_settings": self.gate_settings(objective) if fusion == "learned" else None})
         write_jsonl(directory / "predictions.jsonl", predictions)
-        write_jsonl(directory / "error_cases.jsonl", [dict(row, gold=self.corpus.by_id[row["pair_id"]]["label"])
-                                                     for row in predictions if row["label"] != self.corpus.by_id[row["pair_id"]]["label"]])
-        report = evaluate(self.corpus.pairs_for(documents), predictions)
+        write_jsonl(directory / "error_cases.jsonl", [dict(row, gold=self.task.label(self.corpus.by_id[row["pair_id"]]["label"]))
+                                                     for row in predictions if row["label"] != self.task.label(self.corpus.by_id[row["pair_id"]]["label"])])
+        report = evaluate(self.corpus.pairs_for(documents), predictions, self.task)
         write_json(directory / "metrics.json", report)
         return directory, report
 

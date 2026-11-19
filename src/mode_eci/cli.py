@@ -52,6 +52,7 @@ def parser():
     comparison.add_argument("--second", required=True)
     comparison.add_argument("--output", required=True)
     comparison.add_argument("--by-topic", action="store_true")
+    comparison.add_argument("--metric", choices=["direction", "existence"])
     summary = commands.add_parser("summarize")
     summary.add_argument("--predictions", nargs="+", required=True)
     summary.add_argument("--output", required=True)
@@ -97,7 +98,7 @@ def main(argv=None):
                   "data_exists": (Path(config["data_dir"]) / "splits.json").exists()}
     elif args.command in ("compare", "summarize"):
         from .reporting import compare_files, summarize_files
-        output = compare_files(config, args.first, args.second, args.output, args.by_topic) if args.command == "compare" else summarize_files(config, args.predictions, args.output)
+        output = compare_files(config, args.first, args.second, args.output, args.by_topic, args.metric) if args.command == "compare" else summarize_files(config, args.predictions, args.output)
     elif args.command == "calibrate":
         from .calibration import calibrate_records
         output = calibrate_records(config, args.calibration_records, args.prediction_records, args.output, args.fold)

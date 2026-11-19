@@ -8,6 +8,7 @@ from transformers import AutoModel, AutoTokenizer
 
 from .io import checkpoint_fingerprint, read_json, write_json
 from .prompts import register_tokens
+from .tasks import get_task
 
 
 def masked_weights(logits, mask, temperature=1.0, top_k=None):
@@ -57,20 +58,21 @@ def gate_loss(logits, probabilities, labels, mask, settings):
 
 
 class QueryGate(nn.Module):
-    def __init__(self, encoder, tokenizer, branches, settings):
+    def __init__(self, encoder, tokenizer, branches, settings, task="direction"):
         super().__init__()
         self.encoder, self.tokenizer = encoder, tokenizer
         self.branches, self.settings = branches, settings
+        self.task = get_task(task)
         self.mlp = nn.Sequential(nn.Linear(encoder.config.hidden_size, settings["hidden_size"]), nn.GELU(),
                                  nn.Dropout(settings["dropout"]), nn.Linear(settings["hidden_size"], len(branches)))
 
     @classmethod
-    def create(cls, branches, settings):
+    def create(cls, branches, settings, task="direction"):
         tokenizer = AutoTokenizer.from_pretrained(settings["name"], revision=settings["revision"])
-        register_tokens(tokenizer)
+        register_tokens(tokenizer, task)
         encoder = AutoModel.from_pretrained(settings["name"], revision=settings["revision"])
         encoder.resize_token_embeddings(len(tokenizer), mean_resizing=False)
-        return cls(encoder, tokenizer, branches, settings)
+        return cls(encoder, tokenizer, branches, settings, task)
 
     def forward(self, batch):
         inputs = {k: v for k, v in batch.items() if k in self.tokenizer.model_input_names}
@@ -81,16 +83,18 @@ class QueryGate(nn.Module):
         self.encoder.save_pretrained(directory / "encoder")
         self.tokenizer.save_pretrained(directory / "tokenizer")
         torch.save(self.mlp.state_dict(), directory / "mlp.pt")
-        write_json(directory / "gate.json", {"branches": self.branches, "settings": self.settings,
+        write_json(directory / "gate.json", {**self.task.metadata(), "branches": self.branches, "settings": self.settings,
                                             "checkpoint_fingerprint": checkpoint_fingerprint(directory)})
 
     @classmethod
-    def load(cls, directory):
+    def load(cls, directory, task=None):
         directory = Path(directory)
         meta = read_json(directory / "gate.json")
+        specification = get_task(meta.get("task", "direction") if task is None else task)
+        specification.check(meta)
         if checkpoint_fingerprint(directory) != meta["checkpoint_fingerprint"]:
             raise ValueError("Gate checkpoint fingerprint differs")
         model = cls(AutoModel.from_pretrained(directory / "encoder"), AutoTokenizer.from_pretrained(directory / "tokenizer"),
-                    meta["branches"], meta["settings"])
+                    meta["branches"], meta["settings"], specification)
         model.mlp.load_state_dict(torch.load(directory / "mlp.pt", map_location="cpu", weights_only=True))
         return model

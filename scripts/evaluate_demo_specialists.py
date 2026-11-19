@@ -26,7 +26,7 @@ def evaluate_specialists(experiment, split, shared=False):
     mode = "D_all" if shared else "D_specialists"
     directory = experiment.root / "results" / f"{split}_{mode}_stage"
     checkpoints = {b: context["directory"] / "experts" / b / "checkpoint" for b in branches}
-    claim_run(directory, {"split": split, "mode": mode,
+    claim_run(directory, {**experiment.task.metadata(), "split": split, "mode": mode,
                          "experiment": read_json(experiment.root / "manifest.json")["fingerprint"],
                          "checkpoints": {b: read_json(p / "expert.json")["checkpoint_fingerprint"]
                                          for b, p in checkpoints.items()}})
@@ -34,23 +34,25 @@ def evaluate_specialists(experiment, split, shared=False):
     predictions_path = directory / "predictions.jsonl"
     if metrics_path.is_file():
         report = read_json(metrics_path)
-        if all("direction_fp_only" in report.get(group, {}) for group in ("overall", "intra", "cross")):
+        required_metric = "direction_fp_only" if experiment.task.name == "direction" else "existence"
+        if (report.get("task", "direction") == experiment.task.name
+                and all(required_metric in report.get(group, {}) for group in ("overall", "intra", "cross"))):
             return directory, report
     pairs = experiment.corpus.pairs_for(documents)
     if predictions_path.is_file():
-        report = evaluate(pairs, list(read_jsonl(predictions_path)))
+        report = evaluate(pairs, list(read_jsonl(predictions_path)), experiment.task)
         write_json(metrics_path, report)
         return directory, report
     predictions = []
     features = experiment.get_features()
     for branch in branches:
-        model = Expert.load(checkpoints[branch])
+        model = Expert.load(checkpoints[branch], experiment.task)
         builder = experiment.input_builder(model.tokenizer, model.head)
         rows = experiment.expert_rows(context, documents, branch, builder)
         model.to(device_name(experiment.config["training"]["device"]))
         output = predict_expert(model, rows, experiment.config["training"])
         for row, result in zip(rows, output):
-            predictions.append({"pair_id": row["pair_id"], "doc_id": row["doc_id"],
+            predictions.append({**experiment.task.metadata(), "pair_id": row["pair_id"], "doc_id": row["doc_id"],
                 "features": features[row["pair_id"]], "test_only": experiment.config["test_only"],
                 "experts": {branch: {**result, "coverage": row["coverage"], "retrieval": row["retrieval"]}},
                 "probabilities": result["probabilities"], "label": int(np.argmax(result["probabilities"])),
@@ -58,10 +60,10 @@ def evaluate_specialists(experiment, split, shared=False):
                 "active_mask": [b == branch for b in branches], "status": "success"})
         release(model)
         del model
-    report = evaluate(pairs, predictions)
+    report = evaluate(pairs, predictions, experiment.task)
     write_jsonl(predictions_path, predictions)
     write_json(metrics_path, report)
-    print(f"EARLY_EVALUATION {split} {mode}: {report['overall']['direction']}", flush=True)
+    print(f"EARLY_EVALUATION {split} {mode}: {report['overall'][experiment.task.name]}", flush=True)
     return directory, report
 
 

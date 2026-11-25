@@ -7,7 +7,7 @@ $python = "F:\MoDE_ECI_research\.venv\Scripts\python.exe"
 & $python scripts/run_demo_pretraining.py --config configs/roberta_mlm_dall_seed3407_gpu.yaml --fold 0
 ```
 
-进度和最终审核位于 `runs/roberta_dall_seed3407_gpu/`。训练权重仍保存在配置指定的独立实验目录中。
+进度和最终审核位于 `runs/roberta_dall_seed3407_gpu_e15_p5/`。训练权重保存在配置指定的实验目录中。
 
 本仓库实现 v4.1 的可训练多专家方案：规则选择四类 demo 分支之一，MPNet 检索训练示例，BERT 或 BART 专家输出三类分布，独立 BERT 门控融合概率。正式训练和评测在服务器执行；本机验收使用微型随机模型及少量真实资产前向，不提供研究成绩。
 
@@ -122,7 +122,7 @@ python -m mode_eci --config configs/bart_slots.yaml --fold 0 predict --split dev
 python -m mode_eci --config configs/bart_slots.yaml --fold 0 predict --split dev --fusion learned --objective G3
 ```
 
-`oof` 自动完成三个内部组及缺少的专家任务。内部留出文档不参与对应专家、S 预热或 demo 索引。专家用固定开发集的方向 F1、再按 NLL 选择 checkpoint；门控在折外记录的独立文档组选择轮次，再用全部折外记录重训。开发集已用于模型选择，应如实报告。
+`oof` 自动完成三个内部组及缺少的专家任务。内部留出文档不参与对应专家、S 预热或 demo 索引。专家在固定开发集选模型，门控在折外记录的独立文档组上选模型。每轮评估验证集，优先选择任务 F1 最高的 checkpoint，F1 相同时选择 NLL 最低的 checkpoint。专家和门控最多训练 15 轮，连续 5 轮无改善时早停。开发集已用于模型选择，应如实报告。
 
 每个无图系统每折每种子有 `3 × 7 + 7 = 28` 个专家训练任务；三种门控共享它们。完成阶段自动复用；中断任务从固定种子重跑，尚不恢复半轮优化器状态。代码、数据、模型或专家配置变动时需新实验 ID，避免混用。不要让两个进程同时写同一 scope/branch。
 

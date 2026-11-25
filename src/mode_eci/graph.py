@@ -105,9 +105,10 @@ def train_graph_expert(experiment, scope):
     rows = experiment.expert_rows(context, context["train"], "G", builder, graphs=train_graphs)
     validation = experiment.expert_rows(context, experiment.dev_docs, "G", builder, graphs=validation_graphs)
     destination = context["directory"] / "experts" / "G"
-    if not rows:
+    if not rows or not validation:
+        split = "training" if not rows else "validation"
         write_json(destination / "training.json", {"status": "complete", "available": False, "training_samples": 0,
-                                                   "reason": "No predicted graph evidence in training documents"})
+                                                   "reason": f"No predicted graph evidence in {split} documents"})
         write_json(destination / "provenance.json", {"train_documents": context["train"], "branch": "G",
                                                     "seed_graph": "document_oof_equal_no_graph", "test_only": experiment.config["test_only"]})
         release(model)
@@ -122,7 +123,7 @@ def train_graph_expert(experiment, scope):
         return validation_metrics([r["label"] for r in validation], [r["probabilities"] for r in output])
 
     fit(model, rows, model.tokenizer, settings, experiment.config["seed"], destination, loss_fn,
-        validate if validation else None, lambda current: current.save(destination / "checkpoint"))
+        validate, lambda current: current.save(destination / "checkpoint"))
     write_json(destination / "provenance.json", {"train_documents": context["train"], "branch": "G",
                                                 "seed_graph": "document_oof_equal_no_graph", "test_only": experiment.config["test_only"],
                                                 "graph_training_coverage": len(rows) / len(experiment.corpus.pairs_for(context["train"]))})

@@ -1,4 +1,4 @@
-experiment_id: v4_bart_base_slots_r2
+experiment_id: v4_bart_base_slots_r2_e15_p5
 seed: 209
 test_only: false
 data_dir: data/esc
@@ -45,8 +45,8 @@ input:
 training:
   device: auto
   cpu_threads: 4
-  epochs: 10
-  patience: 2
+  epochs: 15
+  patience: 5
   batch_size: 8
   accumulation_steps: 4
   learning_rate: 2.0e-05
@@ -66,8 +66,8 @@ gate:
   dropout: 0.1
   learning_rate: 2.0e-05
   mlp_learning_rate: 0.0001
-  epochs: 10
-  patience: 2
+  epochs: 15
+  patience: 5
   validation_fraction: 0.15
 graph:
   enabled: false

@@ -113,8 +113,8 @@ def fit(model, rows, tokenizer, settings, seed, directory, loss_fn, validation_f
                            "optimizer_steps": optimizer_steps, "updates_per_epoch": math.ceil(len(batches) / settings["accumulation_steps"]),
                            "elapsed_seconds": time.monotonic() - started})
                 last_progress = time.monotonic()
-        validation = validation_fn(model) if validation_fn is not None else None
-        key = (validation["selection_f1"], -validation["nll"]) if validation is not None else (epoch, 0)
+        validation = validation_fn(model)
+        key = (validation["selection_f1"], -validation["nll"])
         record = {"epoch": epoch + 1, "training_loss": total_loss / len(rows), "validation": validation,
                   "optimizer_steps": optimizer_steps, "last_gradient_norm": float(norm),
                   "elapsed_seconds": time.monotonic() - started}
@@ -126,7 +126,7 @@ def fit(model, rows, tokenizer, settings, seed, directory, loss_fn, validation_f
         else:
             stale += 1
         write_json(directory / "history.json", history)
-        if validation_fn is not None and stale >= settings["patience"]:
+        if stale >= settings["patience"]:
             break
     summary = {"status": "complete", "best_epoch": best_epoch, "epochs_run": len(history),
                "training_samples": len(rows), "seconds": time.monotonic() - started,

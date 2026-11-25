@@ -239,6 +239,10 @@ class Experiment:
             builder = self.input_builder(model.tokenizer, model.head)
             rows = self.expert_rows(context, context["train"], branch, builder)
             validation = self.expert_rows(context, self.dev_docs, branch, builder)
+            if rows and not validation and branch in ("D1", "D2", "D3", "D4"):
+                # 开发集没有同类查询时，用各验证查询自身的 demo 类型构建输入。
+                validation = self.expert_rows(context, self.dev_docs, "D_all", builder)
+                print(f"{destination}: no in-cell validation queries; using all validation queries", flush=True)
 
             def loss_fn(current, batch, examples):
                 labels = torch.tensor([r["label"] for r in examples], device=batch["input_ids"].device)
@@ -258,8 +262,10 @@ class Experiment:
                 write_json(destination / "progress.json", summary)
                 print(f"{destination}: no training queries; retained D_all parameters", flush=True)
             else:
+                if not validation:
+                    raise ValueError(f"No validation samples: {destination}")
                 fit(model, rows, model.tokenizer, self.config["training"], self.config["seed"], destination, loss_fn,
-                    validate if validation else None, lambda current: current.save(destination / "checkpoint"))
+                    validate, lambda current: current.save(destination / "checkpoint"))
             write_json(destination / "provenance.json", {**self.task.metadata(), "train_documents": context["train"], "branch": branch,
                                                         "initialization": None if initialization is None else str(initialization),
                                                         "initialization_fingerprint": None if initialization is None else read_json(initialization / "expert.json")["checkpoint_fingerprint"],
@@ -393,7 +399,7 @@ class Experiment:
         directory = self.gate_directory(objective)
         claim_run(directory, {**self.task.metadata(), "settings": settings, "oof": read_json(self.root / "oof" / "provenance.json"),
                               "experiment": read_json(self.root / "manifest.json")["fingerprint"]})
-        if (directory / "refit" / "training.json").exists():
+        if (directory / "selection" / "training.json").exists():
             return
         records = self.supervised_oof()
         seed_everything(self.config["seed"], self.config["training"]["cpu_threads"])
@@ -404,6 +410,8 @@ class Experiment:
         validation_docs = set(groups[0])
         train = [r for r in rows if r["doc_id"] not in validation_docs]
         validation = [r for r in rows if r["doc_id"] in validation_docs]
+        if not validation:
+            raise ValueError(f"No validation samples: {directory}")
         training_settings = dict(self.config["training"], learning_rate=settings["learning_rate"], epochs=settings["epochs"], patience=settings["patience"])
         targets, covered = teacher_targets(torch.tensor([r["expert_probabilities"] for r in rows]),
                                             torch.tensor([r["label"] for r in rows]), torch.tensor([r["active_mask"] for r in rows]), settings["teacher_temperature"])
@@ -433,15 +441,10 @@ class Experiment:
             return [{"params": current.encoder.parameters(), "lr": settings["learning_rate"]},
                     {"params": current.mlp.parameters(), "lr": settings["mlp_learning_rate"]}]
 
-        selection = fit(model, eligible(train), model.tokenizer, training_settings, self.config["seed"], directory / "selection", loss_fn,
-                        validate, lambda current: current.save(directory / "selection" / "checkpoint"), parameter_groups(model))
-        release(model)
-        seed_everything(self.config["seed"], training_settings["cpu_threads"])
-        model = QueryGate.create(self.config["branches"], settings, self.task)
-        training_settings["epochs"] = selection["best_epoch"]
-        fit(model, eligible(rows), model.tokenizer, training_settings, self.config["seed"], directory / "refit", loss_fn,
-            None, lambda current: current.save(directory / "checkpoint"), parameter_groups(model))
-        write_json(directory / "validation_split.json", {"validation_documents": sorted(validation_docs), "refit_documents": self.train_docs})
+        write_json(directory / "validation_split.json", {"training_documents": sorted(set(self.train_docs) - validation_docs),
+                                                        "validation_documents": sorted(validation_docs)})
+        fit(model, eligible(train), model.tokenizer, training_settings, self.config["seed"], directory / "selection", loss_fn,
+            validate, lambda current: current.save(directory / "checkpoint"), parameter_groups(model))
         release(model)
 
     @torch.no_grad()

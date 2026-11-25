@@ -40,7 +40,8 @@ def audit_training(experiment):
             directory = experts / branch
             info = read_json(directory / "provenance.json")
             summary = read_json(directory / "training.json")
-            if summary["status"] != "complete" or not (directory / "checkpoint" / "expert.json").exists():
+            checkpoint = directory / "checkpoint" / "expert.json"
+            if summary["status"] != "complete" or (summary.get("available", True) and not checkpoint.exists()):
                 raise ValueError(f"Incomplete expert: {directory}")
             if branch in ("D1", "D2", "D3", "D4"):
                 if info["initialization_fingerprint"] != parent_fingerprint:
@@ -56,7 +57,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(ROOT / "configs/roberta_mlm_dall_seed3407_gpu.yaml"))
     parser.add_argument("--fold", default="0")
-    parser.add_argument("--output", default=str(ROOT / "runs/roberta_dall_seed3407_gpu"))
+    parser.add_argument("--output", default=str(ROOT / "runs/roberta_dall_seed3407_gpu_e15_p5"))
     parser.add_argument("--isolate-stages", action="store_true",
                         help="Run inner-fold training, held-out inference, OOF and gate training in separate processes.")
     args = parser.parse_args()

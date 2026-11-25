@@ -30,7 +30,7 @@ R3 的结构路从正标签全池召回跨主题候选，与语义路合并后�
 
 ## 通用 demo 专家预训练
 
-`model.demo_pretraining: true` 在每个 scope 中增加一个训练阶段 `experts/D_all`。它使用该 scope 的全部训练查询；每条查询仍按自身的 D1–D4 类型从相应训练库检索，模板、demo 清单及监督标签与专门化阶段一致。D_all 按全部开发查询的方向 F1、再按 NLL 选择 checkpoint。随后 D1–D4 分别加载同一 scope 的最佳 D_all 参数，只在所属类别查询上继续微调；优化器和学习率调度重新初始化。
+`model.demo_pretraining: true` 在每个 scope 中增加一个训练阶段 `experts/D_all`。它使用该 scope 的全部训练查询；每条查询仍按自身的 D1–D4 类型从相应训练库检索，模板、demo 清单及监督标签与专门化阶段一致。D_all 按全部开发查询的任务 F1、再按 NLL 选择 checkpoint。随后 D1–D4 分别加载同一 scope 的最佳 D_all 参数，只在所属类别查询上继续微调。若开发集没有该分支的同类查询，则用全部开发查询选 checkpoint。优化器和学习率调度在微调前重新初始化。
 
 D_all 仅用于初始化，不加入门控或最终融合。C/S/M 的训练方式由原有设置决定。未开启此选项的配置沿用原流程；`model.warmup` 是独立的 S 预热开关，同时开启时 D 分支优先使用 D_all。D_all 自身此时可从 S 初始化。
 
@@ -38,7 +38,7 @@ D_all 仅用于初始化，不加入门控或最终融合。C/S/M 的训练方�
 
 每个内部折独立训练 D_all，且不使用内部留出或测试文档；最终 scope 使用完整外层训练集。三内部折、七专家的系统增加四个 D_all 阶段，共 32 个专家训练任务。各阶段记录训练 pair IDs、类别计数及初始化 checkpoint 指纹，支持完成阶段复用。
 
-本机完整运行配置为 `configs/roberta_mlm_dall_seed3407_gpu.yaml`，参考 seed3407 GPU 配置，仅增加 D_all、独立实验 ID，并为 8GB GPU 使用 BF16 和 `4 × 8` 有效 batch 32。数据不抽样，最多 10 轮、patience 2。`scripts/run_demo_pretraining.py` 强制离线复用缓存权重，先完成最终 D_all→D1–D4 和 dev/test 独立评测，写入 `demo_results.json`；随后完成其余最终专家、三组 OOF、G3 门控、dev/test 的 D/equal/learned 评测及训练来源审核。独立评测也可用 `scripts/evaluate_demo_specialists.py` 运行。一个外层折的结果不能当作五折结果。
+本机完整运行配置为 `configs/roberta_mlm_dall_seed3407_gpu.yaml`。该配置启用 D_all，并为 8GB GPU 使用 BF16 和 `4 × 8` 有效 batch 32。数据不抽样，最多训练 15 轮，验证指标连续 5 轮无改善时早停。`scripts/run_demo_pretraining.py` 强制离线复用缓存权重，先完成最终 D_all→D1–D4 和 dev/test 独立评测，写入 `demo_results.json`；随后完成其余最终专家、三组 OOF、G3 门控、dev/test 的 D/equal/learned 评测及训练来源审核。独立评测也可用 `scripts/evaluate_demo_specialists.py` 运行。一个外层折的结果不能当作五折结果。
 
 ## 门控和交叉拟合
 
@@ -48,7 +48,7 @@ D_all 仅用于初始化，不加入门控或最终融合。C/S/M 的训练方�
 
 G1 优化融合 NLL；G2 只优化教师交叉熵；G3 优化融合 NLL 加逐样本教师辅助项。专家输出 detach，训练门控时不加载专家。未激活分支权重为零。
 
-外层训练文档尽量平衡正例数、候选数和主题，分三个内部组。每个组的专家、S 预热和索引只能使用其他组。专家 checkpoint 用固定开发集选择；内部留出 gold 仅在预测生成后用于门控监督。门控在折外记录的文档级内部验证中选择轮次，再用全部折外记录重训。最终专家另外用完整外层训练文档训练。
+外层训练文档尽量平衡正例数、候选数和主题，分三个内部组。每个组的专家、S 预热和索引只能使用其他组。专家 checkpoint 用固定开发集选择。内部留出 gold 仅在预测生成后用于门控监督。门控按文档将折外记录分为训练集和验证集，并直接使用验证集选出的 checkpoint 做推理。最终专家另外用完整外层训练文档训练。
 
 ## 产物
 
@@ -64,7 +64,7 @@ artifacts/<experiment_id>/seed_<seed>/fold_<fold>/
     predictions/held/           无 gold 的折外专家记录
   oof/                          拼接记录和来源文档边界
   final/                        完整外层训练专家与索引
-  gates/<objective>_<hash>/      门控选择、重训、教师目标和覆盖率
+  gates/<objective>_<hash>/      门控验证历史、最佳 checkpoint、教师目标和覆盖率
   results/                      逐条预测和评测
   graph_seed/                   G 扩展的嵌套无图种子实验
 ```
@@ -74,6 +74,8 @@ artifacts/<experiment_id>/seed_<seed>/fold_<fold>/
 ## 可选实验边界
 
 已提供 BART large、独立温度校准、原论文判决和单轮预测图。共享 backbone、自由解释生成、自然词组 verbalizer、多轮图更新、GNN 编码和额外主题外划分仍是后续研究项，不参与默认主线。
+
+图专家 G 需要训练集和开发集都含有可用的预测图证据。任一集合缺少这类证据时，将该 scope 的 G 标记为不可用。
 
 温度工具使用独立校准组和同一冻结专家，检查文档隔离；未自动并入主流程每个内部组。不要把校准分布与 T=1 训练的门控混用。若增加 RoBERTa 公平对照，应把其 tokenizer 加入所有被比较配置的共同 tokenizer 列表。
 

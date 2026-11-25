@@ -263,6 +263,15 @@ def test_binary_full_pipeline_pretraining_gates_calibration_and_reuse(assets, tm
         assert set(coverage["by_gold"]) == {"NONE", "CAUSAL"}
         history = read_json(gate_dir / "selection/history.json")
         assert "existence_f1" in history[0]["validation"]
+        best_epoch = read_json(gate_dir / "selection/training.json")["best_epoch"]
+        split = read_json(gate_dir / "validation_split.json")
+        assert set(split["training_documents"]).isdisjoint(split["validation_documents"])
+        validation_docs = set(split["validation_documents"])
+        validation = experiment.gate_rows([r for r in supervised if r["doc_id"] in validation_docs],
+                                          InputBuilder([gate.tokenizer], "bert_cls", config["input"], EXISTENCE))
+        probabilities, _ = experiment.gate_probabilities(gate, validation)
+        scores = validation_metrics([r["label"] for r in validation], probabilities, EXISTENCE)
+        assert scores == pytest.approx(history[best_epoch - 1]["validation"])
         directory, report = experiment.predict("test", "learned", objective)
         assert report["coverage"] == 1 and report["test_only"] and report["task"] == "existence"
         predictions = list(read_jsonl(directory / "predictions.jsonl"))

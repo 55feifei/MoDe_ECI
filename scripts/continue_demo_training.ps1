@@ -4,8 +4,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path -Parent $PSScriptRoot
-$output = Join-Path $workspace 'runs/roberta_dall_seed3407_gpu'
-$expertRoot = Join-Path $workspace 'artifacts/v4_roberta_mlm_dall_seed3407_gpu_v1/seed_3407/fold_0/final/experts'
+$output = Join-Path $workspace 'runs/roberta_dall_seed3407_gpu_e15_p5'
+$expertRoot = Join-Path $workspace 'artifacts/v4_roberta_mlm_dall_seed3407_gpu_v1_e15_p5/seed_3407/fold_0/final/experts'
 $python = 'F:\MoDE_ECI_research\.venv\Scripts\python.exe'
 $originalProcess = Get-Process -Id $TrainerProcessId
 $originalStartTime = $originalProcess.StartTime

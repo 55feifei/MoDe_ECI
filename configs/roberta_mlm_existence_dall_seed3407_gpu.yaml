@@ -1,4 +1,4 @@
-experiment_id: v4_roberta_mlm_existence_dall_seed3407_gpu_v1
+experiment_id: v4_roberta_mlm_existence_dall_seed3407_gpu_v1_e15_p5
 task: existence
 seed: 3407
 test_only: false
@@ -40,8 +40,8 @@ input:
 training:
   device: cuda
   cpu_threads: 4
-  epochs: 10
-  patience: 2
+  epochs: 15
+  patience: 5
   batch_size: 4
   accumulation_steps: 8
   learning_rate: 2.0e-05
@@ -61,8 +61,8 @@ gate:
   dropout: 0.1
   learning_rate: 2.0e-05
   mlp_learning_rate: 0.0001
-  epochs: 10
-  patience: 2
+  epochs: 15
+  patience: 5
   validation_fraction: 0.15
 graph:
   enabled: false

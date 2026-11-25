@@ -1,4 +1,4 @@
-"""query-only BERT 门控及 G1/G2/G3 损失。"""
+"""仅编码查询的门控（默认 RoBERTa）及 G1/G2/G3 损失。"""
 
 from pathlib import Path
 
@@ -7,6 +7,7 @@ from torch import nn
 from transformers import AutoModel, AutoTokenizer
 
 from .io import checkpoint_fingerprint, read_json, write_json
+from .losses import focal_loss
 from .prompts import register_tokens
 from .tasks import get_task
 
@@ -41,7 +42,8 @@ def gate_loss(logits, probabilities, labels, mask, settings):
     probabilities = probabilities.detach()
     weights = masked_weights(logits, mask, settings["temperature"])
     fused = (weights[:, :, None] * probabilities).sum(1)
-    mix_loss = -fused.gather(1, labels[:, None]).clamp_min(1e-12).log().mean()
+    log_probs = fused.clamp(min=torch.finfo(fused.dtype).tiny, max=1.0).log()
+    mix_loss = focal_loss(log_probs, labels)
     targets, covered = teacher_targets(probabilities, labels, mask, settings["teacher_temperature"])
     log_weights = (logits / settings["temperature"]).masked_fill(~mask, -torch.inf).log_softmax(-1)
     log_weights = log_weights.masked_fill(~mask, 0)

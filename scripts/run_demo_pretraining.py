@@ -57,7 +57,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(ROOT / "configs/roberta_mlm_dall_seed3407_gpu.yaml"))
     parser.add_argument("--fold", default="0")
-    parser.add_argument("--output", default=str(ROOT / "runs/roberta_dall_seed3407_gpu_e15_p5"))
+    parser.add_argument("--output", default=str(ROOT / "runs/roberta_dall_seed3407_gpu_e15_p5_focal2"))
     parser.add_argument("--isolate-stages", action="store_true",
                         help="Run inner-fold training, held-out inference, OOF and gate training in separate processes.")
     args = parser.parse_args()

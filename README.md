@@ -7,9 +7,9 @@ $python = "F:\MoDE_ECI_research\.venv\Scripts\python.exe"
 & $python scripts/run_demo_pretraining.py --config configs/roberta_mlm_dall_seed3407_gpu.yaml --fold 0
 ```
 
-进度和最终审核位于 `runs/roberta_dall_seed3407_gpu_e15_p5/`。训练权重保存在配置指定的实验目录中。
+进度和最终审核位于 `runs/roberta_dall_seed3407_gpu_e15_p5_focal2/`。训练权重保存在配置指定的实验目录中。
 
-本仓库实现 v4.1 的可训练多专家方案：规则选择四类 demo 分支之一，MPNet 检索训练示例，BERT 或 BART 专家输出三类分布，独立 BERT 门控融合概率。正式训练和评测在服务器执行；本机验收使用微型随机模型及少量真实资产前向，不提供研究成绩。
+v4.1 的多专家方案用规则选择四类 demo 分支之一，用 MPNet 检索训练示例，由各专家预测事件对的因果关系。默认使用独立的 RoBERTa-base 门控融合专家概率。专家分类和门控的融合分类使用等权 Focal Loss（各类 α=1，γ=2）。正式训练和评测在服务器执行，本机用微型随机模型及少量真实资产验证实现。
 
 ## 已实现的方法
 
@@ -19,7 +19,7 @@ $python = "F:\MoDE_ECI_research\.venv\Scripts\python.exe"
 | 分库 | D1 有线索句内、D2 无线索句内、D3 有线索句间、D4 无线索句间；目标依存范围规则与词表对照 |
 | 检索 | 四库或统一库；R0 随机、R1 MPNet、R2 审核难负例、R3 加跨主题结构召回；2 或 3 个 demo |
 | 专家 | BERT 事件表示加 MLP、BERT MLM、BART 关系 token、BART base/large 角色槽位、RoBERTa MLM |
-| 融合 | 等权、单专家、query-only BERT 门控；G1 融合损失、G2 正确专家监督、G3 联合损失 |
+| 融合 | 等权、单专家或仅编码查询的 RoBERTa 门控。G1 优化融合损失，G2 学习正确专家的权重，G3 联合训练 |
 | 图扩展 | 单轮预测图文本专家；嵌套交叉拟合种子图；移除查询自身双向边；无证据时屏蔽 G |
 | 评测 | 方向/存在性指标、NLL、Brier、可靠性、专家共同错误、配对文档 bootstrap、五折多种子汇总 |
 
@@ -68,7 +68,7 @@ python -m mode_eci --config configs/bert_mlm.yaml prepare-data --download
 
 ```powershell
 $python = "F:\MoDE_ECI_research\.venv\Scripts\python.exe"
-& $python scripts/run_demo_pretraining.py --config configs/roberta_mlm_existence_dall_seed3407_gpu.yaml --fold 0 --output runs/roberta_existence_dall_seed3407_gpu
+& $python scripts/run_demo_pretraining.py --config configs/roberta_mlm_existence_dall_seed3407_gpu.yaml --fold 0 --output runs/roberta_existence_dall_seed3407_gpu_focal2
 ```
 
 也可从任一现有模型配置生成独立实验，并沿用分阶段训练命令：

@@ -56,7 +56,8 @@ def test_binary_heads_gradients_label_invariance_and_roundtrip(assets, tmp_path,
     assert torch.equal(result["loss"], reverse_result["loss"])
     assert result["probabilities"].shape == (2, 2)
     assert torch.allclose(result["probabilities"].sum(-1), torch.ones(2))
-    assert torch.isfinite(result["loss"])
+    gold_prob = result["probabilities"].gather(1, labels[:, None])
+    torch.testing.assert_close(result["loss"], (-(1 - gold_prob).square() * gold_prob.log()).mean())
     assert torch.allclose(result["probabilities"], model(batch, 1 - labels)["probabilities"])
     if head == "bart_slots":
         combinations = result["detail"]["combination_scores"].softmax(-1)
@@ -80,7 +81,7 @@ def test_old_checkpoints_default_to_direction_and_gate_checks_task(assets, tmp_p
     config, _ = assets
     expert = Expert.create(config["model"])
     expert.save(tmp_path / "expert")
-    gate = QueryGate.create(config["branches"], config["gate"])
+    gate = QueryGate.create(config["branches"], dict(config["gate"], name=config["model"]["name"]))
     gate.save(tmp_path / "gate")
     for path in (tmp_path / "expert/expert.json", tmp_path / "gate/gate.json"):
         meta = read_json(path)
@@ -88,7 +89,8 @@ def test_old_checkpoints_default_to_direction_and_gate_checks_task(assets, tmp_p
         meta.pop("label_names")
         write_json(path, meta)
     assert Expert.load(tmp_path / "expert").task.name == "direction"
-    assert QueryGate.load(tmp_path / "gate").task.name == "direction"
+    loaded_gate = QueryGate.load(tmp_path / "gate")
+    assert loaded_gate.task.name == "direction" and loaded_gate.encoder.config.model_type == "bert"
     with pytest.raises(ValueError, match="Task mismatch"):
         QueryGate.load(tmp_path / "gate", "existence")
 
@@ -259,6 +261,7 @@ def test_binary_full_pipeline_pretraining_gates_calibration_and_reuse(assets, tm
         gate_dir = experiment.gate_directory(objective)
         gate = QueryGate.load(gate_dir / "checkpoint", "existence")
         assert gate.task == EXISTENCE
+        assert gate.encoder.config.model_type == "roberta"
         coverage = read_json(gate_dir / "coverage.json")
         assert set(coverage["by_gold"]) == {"NONE", "CAUSAL"}
         history = read_json(gate_dir / "selection/history.json")

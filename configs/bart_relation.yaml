@@ -1,4 +1,4 @@
-experiment_id: v4_bart_base_relation_r2_e15_p5
+experiment_id: v4_bart_base_relation_r2_e15_p5_focal2
 seed: 209
 test_only: false
 data_dir: data/esc
@@ -56,8 +56,8 @@ training:
   precision: fp32
   validation_fraction: 0.15
 gate:
-  name: google-bert/bert-base-uncased
-  revision: 86b5e0934494bd15c9632b12f734a8a67f723594
+  name: FacebookAI/roberta-base
+  revision: e2da8e2f811d1448a5b465c236feacd80ffbac7b
   objective: G3
   teacher_temperature: 1.0
   teacher_weight: 0.5

@@ -4,10 +4,10 @@ from pathlib import Path
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 from transformers import AutoModel, AutoModelForMaskedLM, AutoModelForSeq2SeqLM, AutoTokenizer
 
 from .io import checkpoint_fingerprint, read_json, write_json
+from .losses import focal_loss
 from .prompts import register_tokens
 from .tasks import get_task
 
@@ -63,12 +63,12 @@ class Expert(nn.Module):
 
     def forward(self, batch, labels=None):
         inputs = {k: v for k, v in batch.items() if k in self.tokenizer.model_input_names}
+        slot_loss = None
         if self.head == "bert_mlm":
             logits = self.backbone(**inputs).logits
             rows = torch.arange(logits.shape[0], device=logits.device)
             scores = logits[rows, batch["mask_position"]][:, self.relation_ids].float()
             detail = {"relation_logits": scores}
-            loss = None if labels is None else F.cross_entropy(scores, labels)
         elif self.head == "bert_cls":
             hidden = self.backbone(**inputs).last_hidden_state
             means = []
@@ -77,7 +77,6 @@ class Expert(nn.Module):
                 means.append((hidden * weights).sum(1) / weights.sum(1).clamp_min(1))
             scores = self.classifier(torch.cat(means, dim=-1)).float()
             detail = {"relation_logits": scores}
-            loss = None if labels is None else F.cross_entropy(scores, labels)
         else:
             size = inputs["input_ids"].shape[0]
             decoder = self.fixed_decoder_ids.unsqueeze(0).expand(size, -1)
@@ -85,22 +84,21 @@ class Expert(nn.Module):
             if self.head == "bart_relation":
                 scores = logits[:, 0, self.relation_ids]
                 detail = {"relation_logits": scores}
-                loss = None if labels is None else F.cross_entropy(scores, labels)
             else:
                 log_probs = logits.log_softmax(-1)
                 pairs = torch.tensor([[self.role_ids[0], self.role_ids[0]], [self.role_ids[1], self.role_ids[2]],
                                       [self.role_ids[2], self.role_ids[1]]], device=logits.device)
                 scores = log_probs[:, 0, pairs[:, 0]] + log_probs[:, 1, pairs[:, 1]]
                 detail = {"slot_token_probabilities": log_probs[:, :, self.role_ids].exp(), "combination_scores": scores}
-                loss = None
                 if self.task.name == "existence":
                     # 两种方向是潜在状态，gold 仅监督两者的总概率。
                     scores = torch.stack((scores[:, 0], scores[:, 1:].logsumexp(-1)), dim=-1)
-                    loss = None if labels is None else F.cross_entropy(scores, labels)
                 elif labels is not None:
-                    targets = pairs[labels]
-                    loss = F.cross_entropy(logits.flatten(0, 1), targets.flatten())
-                    loss = loss + self.slot_relation_weight * F.cross_entropy(scores, labels)
+                    slot_loss = focal_loss(log_probs, pairs[labels])
+        loss = None
+        if labels is not None:
+            relation_loss = focal_loss(scores.log_softmax(-1), labels)
+            loss = relation_loss if slot_loss is None else slot_loss + self.slot_relation_weight * relation_loss
         return {"probabilities": (scores / self.temperature).softmax(-1), "scores": scores, "loss": loss, "detail": detail}
 
     def save(self, directory):

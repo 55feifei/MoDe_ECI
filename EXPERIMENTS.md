@@ -4,9 +4,9 @@
 
 ## 概率接口
 
-所有专家的输出顺序为 `[NONE, E1_TO_E2, E2_TO_E1]`。
+方向任务的专家输出顺序为 `[NONE, E1_TO_E2, E2_TO_E1]`，存在性任务为 `[NONE, CAUSAL]`。
 
-`bert_mlm` 在唯一查询 MASK 位置读取三个原子关系 token 的 logits，只在这三个 logits 上归一化和计算交叉熵。`bert_cls` 对两个事件正文的 hidden states 分别取均值，拼接后经 MLP 三分类，支持不连续和重叠 span。
+专家训练对真实类别概率 `p_t` 计算等权 Focal Loss，即 `-(1 - p_t)^2 * log(p_t)`，按预测目标取平均。每个类别的 α 都是 1。`bert_mlm` 在查询 MASK 位置对任务的关系 token 归一化。`bert_cls` 对两个事件正文的 hidden states 分别取均值，拼接后经 MLP 分类，支持不连续和重叠 span。
 
 `bart_relation` 对固定单槽位预测关系 token。`bart_slots` 使用固定 decoder 模板 `In this context, <SLOT> causes <SLOT>.`，手工按 BART 约定右移。不同 gold 使用完全相同的 decoder 输入。
 
@@ -16,7 +16,7 @@
 | E1_TO_E2 | `<E1>` | `<E2>` |
 | E2_TO_E1 | `<E2>` | `<E1>` |
 
-槽位主损失是两个位置完整词表交叉熵的平均。三类兼容分数是两个目标 token 的词表 log probability 之和，再在三个合法组合上 softmax。这是固定模板的组合评分，不称为自回归联合概率。`slot_relation_weight` 可单列实验加入组合交叉熵，默认 0；专家温度默认 1。
+方向任务的槽位主损失是两个位置完整词表 Focal Loss 的平均。每个合法组合的分数是两个目标 token 的词表对数概率之和，在三个组合上做 softmax 得到关系分布。`slot_relation_weight` 控制附加的关系 Focal Loss，默认 0。存在性任务将两个方向边缘化后计算二分类 Focal Loss。专家温度默认 1。
 
 ## 规则和检索
 
@@ -42,11 +42,11 @@ D_all 仅用于初始化，不加入门控或最终融合。C/S/M 的训练方�
 
 ## 门控和交叉拟合
 
-门控只输入目标句、事件标记、demo_cell 和句距。分支 logits 经活跃 mask 和 softmax 后，线性加权专家三类分布。默认不截取 top-2。
+门控只输入目标句、事件标记、demo_cell 和句距。分支 logits 经活跃 mask 和 softmax 后，线性加权各专家的关系分布。默认使用全部活跃分支。
 
-正确专家集合按同一三类分布的 argmax 定义，包含 gold 为 NONE 的样本。教师目标在正确集合中对真实类别概率计算 `softmax(q_gold / teacher_temperature)`；错误专家目标为零。全错样本无教师目标：G2 训练前排除，G3 只计算融合损失。覆盖率按真实类别报告。
+专家预测概率最大的类别与真实标签一致时，该专家进入正确集合，这也适用于标签为 NONE 的样本。教师目标在正确集合中对真实类别概率计算 `softmax(q_gold / teacher_temperature)`，其余专家的目标权重为零。G2 训练仅使用有正确专家的样本。G3 在所有专家均预测错误的样本上仅计算融合损失。覆盖率按真实类别报告。
 
-G1 优化融合 NLL；G2 只优化教师交叉熵；G3 优化融合 NLL 加逐样本教师辅助项。专家输出 detach，训练门控时不加载专家。未激活分支权重为零。
+默认门控编码器为 `FacebookAI/roberta-base`。G1 用融合分布中真实关系类别的概率计算等权 Focal Loss（γ=2）。G2 用交叉熵拟合正确专家上的教师分布。G3 在 G1 的损失上加入按 `teacher_weight` 加权的教师交叉熵。门控训练使用冻结的专家预测，未激活分支的权重为零。
 
 外层训练文档尽量平衡正例数、候选数和主题，分三个内部组。每个组的专家、S 预热和索引只能使用其他组。专家 checkpoint 用固定开发集选择。内部留出 gold 仅在预测生成后用于门控监督。门控按文档将折外记录分为训练集和验证集，并直接使用验证集选出的 checkpoint 做推理。最终专家另外用完整外层训练文档训练。
 

@@ -1,4 +1,4 @@
-import copy
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -6,7 +6,15 @@ import torch
 
 from mode_eci.evaluation import align_predictions, evaluate, prf
 from mode_eci.gate import gate_loss, masked_weights, teacher_targets
-from mode_eci.io import claim_run
+from mode_eci.io import claim_run, load_config
+
+
+@pytest.mark.parametrize("name", ["bert_mlm", "roberta_mlm", "bart_slots", "bart_slots_dall_split3407_existence"])
+def test_default_gate_in_shipped_configs(name):
+    gate = load_config(Path(__file__).resolve().parents[1] / "configs" / f"{name}.yaml")["gate"]
+    assert (gate["name"], gate["revision"]) == (
+        "FacebookAI/roberta-base", "e2da8e2f811d1448a5b465c236feacd80ffbac7b"
+    )
 
 
 def test_teacher_values_mask_and_all_wrong():
@@ -35,6 +43,11 @@ def test_gate_losses_are_finite(objective):
     mask = torch.tensor([[True, True, False]])
     loss = gate_loss(logits, q, torch.tensor([1]), mask,
                      {"objective": objective, "temperature": 1., "teacher_temperature": .1, "teacher_weight": .5})
+    active_weights = logits[0, :2].softmax(0)
+    gold_prob = active_weights @ q[0, :2, 1]
+    focal = -(1 - gold_prob).square() * gold_prob.log()
+    teacher = -active_weights[1].log()
+    torch.testing.assert_close(loss, {"G1": focal, "G2": teacher, "G3": focal + 0.5 * teacher}[objective])
     loss.backward()
     assert q.grad is None
     assert torch.isfinite(logits.grad).all()

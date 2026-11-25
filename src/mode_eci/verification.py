@@ -9,7 +9,8 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
-from transformers import BartConfig, BartForConditionalGeneration, BertConfig, BertForMaskedLM, BertTokenizerFast, PreTrainedTokenizerFast
+from transformers import (BartConfig, BartForConditionalGeneration, BertConfig, BertForMaskedLM, BertTokenizerFast,
+                          PreTrainedTokenizerFast, RobertaConfig, RobertaModel)
 
 from .io import code_fingerprint, read_json, read_jsonl, write_json, write_jsonl
 from .tasks import get_task
@@ -77,20 +78,28 @@ def make_tiny_models(directory):
                                                     bos_token_id=0, eos_token_id=2, decoder_start_token_id=2))
     model.save_pretrained(bart)
     write_json(bart / "source.json", {"test_only": True, "kind": "random_tiny_bart"})
-    return bert, bart
+    roberta = directory / "tiny_roberta"
+    # 两个微型模型共用含 <s>、<pad> 和 </s> 的测试词表。
+    tokenizer.save_pretrained(roberta)
+    model = RobertaModel(RobertaConfig(vocab_size=len(tokenizer), hidden_size=16, num_hidden_layers=1,
+                                       num_attention_heads=2, intermediate_size=32, max_position_embeddings=514,
+                                       type_vocab_size=1))
+    model.save_pretrained(roberta)
+    write_json(roberta / "source.json", {"test_only": True, "kind": "random_tiny_roberta"})
+    return bert, bart, roberta
 
 
 def fixture_config(base, directory, head="bert_mlm"):
     config = copy.deepcopy(base)
     directory = Path(directory).resolve()
     data = make_fixture(directory / "data")
-    bert, bart = make_tiny_models(directory / "models")
+    bert, bart, roberta = make_tiny_models(directory / "models")
     config.update(experiment_id=f"test_only_{head}", test_only=True, data_dir=str(data), output_dir=str(directory / "artifacts"), inner_folds=2)
     if config.get("task", "direction") == "existence":
         config["experiment_id"] += "_existence"
     config["rules"]["mode"] = "lexical"
     config["model"].update(name=str(bart if head.startswith("bart") else bert), revision=None, head=head)
-    config["gate"].update(name=str(bert), revision=None, epochs=1, patience=1, hidden_size=16)
+    config["gate"].update(name=str(roberta), revision=None, epochs=1, patience=1, hidden_size=16)
     config["input"].update(max_length=256, demo_max_tokens=55, comparison_tokenizers=[])
     config["training"].update(device="cpu", cpu_threads=1, epochs=1, batch_size=8, accumulation_steps=2, precision="fp32")
     return config

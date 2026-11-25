@@ -7,7 +7,21 @@ import torch
 
 from mode_eci.experts import Expert, collate, paper_decode
 from mode_eci.features import RuleRouter
+from mode_eci.losses import focal_loss
 from mode_eci.prompts import InputBuilder, RELATION_TOKENS
+
+
+def test_focal_loss_on_easy_and_hard_targets():
+    logits = torch.tensor([[20., 0.], [0., -1000.], [0., 0.]], dtype=torch.float64, requires_grad=True)
+    labels = torch.tensor([0, 1, 1])
+    loss = focal_loss(logits.log_softmax(-1), labels)
+    # 三个目标的概率依次接近 1、接近 0、等于 0.5。
+    assert loss.item() == pytest.approx((1000 + 0.25 * np.log(2)) / 3)
+    loss.backward()
+    assert torch.isfinite(logits.grad).all()
+    assert abs(logits.grad[0, 0]) < 1e-20
+    assert logits.grad[1, 1].item() == pytest.approx(-1 / 3)
+    assert logits.grad[2, 1].item() == pytest.approx(-(0.25 * np.log(2) + 0.125) / 3)
 
 
 @pytest.mark.parametrize("head", ["bert_mlm", "bert_cls", "bart_relation", "bart_slots"])
@@ -16,6 +30,8 @@ def test_gradients_fixed_decoder_and_checkpoint_roundtrip(assets, tmp_path, head
     settings = dict(config["model"], head=head)
     if head.startswith("bart"):
         settings["name"] = str(Path(config["model"]["name"]).parent / "tiny_bart")
+    if head == "bart_slots":
+        settings["slot_relation_weight"] = 0.4
     torch.set_num_threads(1)
     model = Expert.create(settings)
     builder = InputBuilder([model.tokenizer], head, config["input"])
@@ -24,10 +40,17 @@ def test_gradients_fixed_decoder_and_checkpoint_roundtrip(assets, tmp_path, head
     batch = collate([row, row], model.tokenizer)
     assert batch["event1_mask"].sum() > 0 and batch["event2_mask"].sum() > 0
     model.eval()
-    first = model(batch, torch.tensor([0, 1]))
+    labels = torch.tensor([0, 1])
+    first = model(batch, labels)
     second = model(batch, torch.tensor([2, 0]))
     assert torch.allclose(first["probabilities"], second["probabilities"])
-    assert torch.isfinite(first["loss"])
+    gold_prob = first["scores"].softmax(-1).gather(-1, labels[:, None])
+    expected = (-(1 - gold_prob).square() * gold_prob.log()).mean()
+    if head == "bart_slots":
+        roles = torch.tensor([[0, 0], [1, 2]])
+        slot_prob = first["detail"]["slot_token_probabilities"].gather(-1, roles.unsqueeze(-1))
+        expected = (-(1 - slot_prob).square() * slot_prob.log()).mean() + settings["slot_relation_weight"] * expected
+    torch.testing.assert_close(first["loss"], expected)
     first["loss"].backward()
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
     if head.startswith("bart"):
